@@ -1,0 +1,45 @@
+{
+  "name": "orbitplan-api",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/server.js",
+    "lint": "eslint . --max-warnings=0",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "prisma:generate": "PATH=/opt/homebrew/bin:$PATH prisma generate",
+    "prisma:migrate": "PATH=/opt/homebrew/bin:$PATH prisma migrate dev",
+    "prisma:push": "PATH=/opt/homebrew/bin:$PATH prisma db push",
+    "db:import-json": "PATH=/opt/homebrew/bin:$PATH node scripts/import-json-to-prisma.mjs",
+    "db:up": "docker compose up -d",
+    "db:down": "docker compose down",
+    "db:logs": "docker compose logs -f postgres"
+  },
+  "dependencies": {
+    "@prisma/client": "^6.16.3",
+    "bcryptjs": "^3.0.3",
+    "cors": "^2.8.5",
+    "dotenv": "^16.6.1",
+    "express": "^4.21.2",
+    "helmet": "^7.1.0",
+    "morgan": "^1.10.0",
+    "multer": "^1.4.5-lts.2",
+    "openai": "^4.104.0",
+    "prisma": "^6.16.3",
+    "zod": "^3.25.67"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.18",
+    "@types/express": "^4.17.23",
+    "@types/morgan": "^1.9.9",
+    "@types/multer": "^1.4.12",
+    "@types/node": "^20.11.30",
+    "eslint": "^9.39.2",
+    "eslint-config-prettier": "^9.1.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3",
+    "typescript-eslint": "^8.54.0"
+  }
+}

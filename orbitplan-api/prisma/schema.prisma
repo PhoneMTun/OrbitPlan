@@ -1,0 +1,174 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum MeetingSource {
+  upload
+  record
+}
+
+enum MeetingStatus {
+  created
+  processing
+  ready
+  approved
+  error
+}
+
+enum ActionStatus {
+  open
+  in_progress
+  done
+}
+
+enum ActionPriority {
+  low
+  medium
+  high
+}
+
+enum EmailLogType {
+  summary
+  action
+}
+
+enum AuthRole {
+  admin
+}
+
+enum ChatRole {
+  user
+  assistant
+}
+
+model Meeting {
+  id               String              @id @default(uuid())
+  title            String
+  scheduledAt      DateTime?
+  attendees        String[]
+  source           MeetingSource
+  status           MeetingStatus
+  actionsConfirmed Boolean             @default(true)
+  createdAt        DateTime            @default(now())
+
+  files            MeetingFile[]
+  transcript       MeetingTranscript?
+  summary          MeetingSummary?
+  actions          ActionItem[]
+  emailLogs        EmailLog[]
+  chatMessages     MeetingChatMessage[]
+}
+
+model MeetingFile {
+  id           String   @id @default(uuid())
+  meetingId    String
+  originalName String
+  mimeType     String
+  size         Int
+  path         String
+  createdAt    DateTime @default(now())
+
+  meeting      Meeting  @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+
+  @@index([meetingId, createdAt])
+}
+
+model MeetingTranscript {
+  id        String   @id @default(uuid())
+  meetingId String   @unique
+  text      String
+  createdAt DateTime @default(now())
+
+  meeting   Meeting  @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+}
+
+model MeetingSummary {
+  id        String   @id @default(uuid())
+  meetingId String   @unique
+  decisions String
+  risks     String
+  notes     String
+  createdAt DateTime @default(now())
+
+  meeting   Meeting  @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+}
+
+model ActionItem {
+  id          String         @id @default(uuid())
+  meetingId   String
+  ownerEmail  String
+  dueDate     String?
+  description String
+  confidence  Float
+  status      ActionStatus
+  priority    ActionPriority
+  createdAt   DateTime       @default(now())
+
+  meeting     Meeting        @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+
+  @@index([meetingId, createdAt])
+}
+
+model EmailLog {
+  id        String       @id @default(uuid())
+  meetingId String
+  recipient String
+  type      EmailLogType
+  payload   Json
+  sentAt    DateTime
+
+  meeting   Meeting      @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+
+  @@index([meetingId, sentAt])
+}
+
+model MeetingChatMessage {
+  id        String    @id @default(uuid())
+  meetingId String
+  role      ChatRole
+  text      String
+  citations String[]
+  createdAt DateTime  @default(now())
+
+  meeting   Meeting   @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+
+  @@index([meetingId, createdAt])
+}
+
+model AuthSession {
+  id        String   @id @default(uuid())
+  userId    String
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([expiresAt])
+  @@index([userId])
+}
+
+model JiraConnection {
+  id           String   @id
+  accessToken  String
+  refreshToken String?
+  expiresAt    DateTime
+  scope        String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+}
+
+model User {
+  id           String        @id @default(uuid())
+  email        String        @unique
+  passwordHash String
+  role         AuthRole
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+
+  sessions     AuthSession[]
+}
