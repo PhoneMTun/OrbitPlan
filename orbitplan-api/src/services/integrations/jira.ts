@@ -2,7 +2,7 @@ import { URLSearchParams } from "node:url";
 import { env } from "../../config/env.js";
 import { getJiraToken, saveJiraToken } from "../../storage/jiraConnectionStore.js";
 import { getMeetingById } from "../../storage/meetingsStore.js";
-import type { JiraExportResult, JiraOAuthToken, JiraProject, JiraSite } from "../../types/jira.js";
+import type { JiraExportResult, JiraOAuthToken, JiraProject, JiraSite, JiraTicketDetails, TicketFormatPreset } from "../../types/jira.js";
 
 const ATLASSIAN_AUTH_BASE = "https://auth.atlassian.com";
 const ATLASSIAN_API_BASE = "https://api.atlassian.com";
@@ -107,46 +107,112 @@ const jiraApi = async <T>(path: string, init?: RequestInit): Promise<T> => {
   return (await response.json()) as T;
 };
 
+const createParagraph = (text: string) => ({
+  type: "paragraph",
+  content: [{ type: "text", text }],
+});
+
+const toPriorityLabel = (priority: string) => (priority === "high" ? "High" : priority === "low" ? "Low" : "Medium");
+
+const buildTicketSummary = (input: {
+  format: TicketFormatPreset;
+  meetingTitle: string;
+  actionDescription: string;
+  ownerEmail: string;
+  priority: string;
+}) => {
+  switch (input.format) {
+    case "engineering":
+      return `[ENG][${toPriorityLabel(input.priority)}] ${input.actionDescription}`;
+    case "operations":
+      return `[OPS] ${input.actionDescription} (${input.ownerEmail})`;
+    case "compliance":
+      return `[CTRL] ${input.meetingTitle}: ${input.actionDescription}`;
+    case "enterprise":
+    default:
+      return `${input.meetingTitle}: ${input.actionDescription}`;
+  }
+};
+
 const toAdfDescription = (input: {
+  format: TicketFormatPreset;
   meetingTitle: string;
   ownerEmail: string;
   priority: string;
   dueDate?: string;
   transcript?: string;
-}) => ({
-  type: "doc",
-  version: 1,
-  content: [
-    {
-      type: "paragraph",
-      content: [{ type: "text", text: `Imported from OrbitPlan: ${input.meetingTitle}` }],
-    },
-    {
-      type: "paragraph",
-      content: [{ type: "text", text: `Owner: ${input.ownerEmail}` }],
-    },
-    {
-      type: "paragraph",
-      content: [{ type: "text", text: `Priority: ${input.priority}` }],
-    },
-    ...(input.dueDate
-      ? [
-          {
-            type: "paragraph",
-            content: [{ type: "text", text: `Due date: ${input.dueDate}` }],
-          },
-        ]
-      : []),
-    ...(input.transcript
-      ? [
-          {
-            type: "paragraph",
-            content: [{ type: "text", text: `Transcript excerpt: ${input.transcript}` }],
-          },
-        ]
-      : []),
-  ],
-});
+  actionDescription: string;
+  decisions?: string;
+  risks?: string;
+  notes?: string;
+  environment?: string;
+  additionalContext?: string;
+}) => {
+  const base = [
+    createParagraph(`Imported from OrbitPlan: ${input.meetingTitle}`),
+    createParagraph(`Owner: ${input.ownerEmail}`),
+    createParagraph(`Priority: ${toPriorityLabel(input.priority)}`),
+    ...(input.dueDate ? [createParagraph(`Due date: ${input.dueDate}`)] : []),
+    ...(input.environment ? [createParagraph(`Environment: ${input.environment}`)] : []),
+  ];
+
+  switch (input.format) {
+    case "engineering":
+      return {
+        type: "doc",
+        version: 1,
+        content: [
+          ...base,
+          createParagraph(`Implementation notes: ${input.actionDescription}`),
+          createParagraph(`Dependencies: ${input.notes || "Review meeting dependencies before implementation."}`),
+          createParagraph(`QA checklist: Validate expected behavior and confirm acceptance criteria.`),
+          createParagraph(`Release notes: ${input.decisions || "No release note summary captured."}`),
+          ...(input.additionalContext ? [createParagraph(`Additional context: ${input.additionalContext}`)] : []),
+          ...(input.transcript ? [createParagraph(`Transcript excerpt: ${input.transcript}`)] : []),
+        ],
+      };
+    case "operations":
+      return {
+        type: "doc",
+        version: 1,
+        content: [
+          ...base,
+          createParagraph(`Operational impact: ${input.actionDescription}`),
+          createParagraph(`Execution readiness: ${input.notes || "Review staffing, timing, and handoff requirements."}`),
+          createParagraph(`Stakeholders: ${input.ownerEmail}`),
+          createParagraph(`Runbook notes: ${input.transcript || "No transcript excerpt available."}`),
+          ...(input.additionalContext ? [createParagraph(`Additional context: ${input.additionalContext}`)] : []),
+        ],
+      };
+    case "compliance":
+      return {
+        type: "doc",
+        version: 1,
+        content: [
+          ...base,
+          createParagraph(`Control objective: ${input.actionDescription}`),
+          createParagraph(`Risk statement: ${input.risks || "Risk detail was not captured in the meeting summary."}`),
+          createParagraph(`Evidence: ${input.transcript || "Attach evidence or transcript excerpts before closure."}`),
+          createParagraph(`Approval trail: Derived from meeting "${input.meetingTitle}" and routed by OrbitPlan.`),
+          ...(input.additionalContext ? [createParagraph(`Additional context: ${input.additionalContext}`)] : []),
+        ],
+      };
+    case "enterprise":
+    default:
+      return {
+        type: "doc",
+        version: 1,
+        content: [
+          ...base,
+          createParagraph(`Business outcome: ${input.actionDescription}`),
+          createParagraph(`Scope: ${input.decisions || "Review the meeting summary for scope confirmation."}`),
+          createParagraph(`Acceptance criteria: ${input.notes || "Confirm completion with the meeting owner."}`),
+          ...(input.additionalContext ? [createParagraph(`Additional context: ${input.additionalContext}`)] : []),
+          ...(input.transcript ? [createParagraph(`Transcript excerpt: ${input.transcript}`)] : []),
+        ],
+      };
+  }
+};
 
 export const jiraIntegration = {
   isConfigured() {
@@ -214,7 +280,13 @@ export const jiraIntegration = {
     }));
   },
 
-  async exportMeetingActions(input: { meetingId: string; cloudId: string; projectKey: string }): Promise<JiraExportResult> {
+  async exportMeetingActions(input: {
+    meetingId: string;
+    cloudId: string;
+    projectKey: string;
+    ticketFormatPreset?: TicketFormatPreset;
+    ticketDetails?: JiraTicketDetails;
+  }): Promise<JiraExportResult> {
     const meeting = await getMeetingById(input.meetingId);
     if (!meeting) {
       throw new JiraIntegrationError("Meeting not found", 404);
@@ -224,6 +296,10 @@ export const jiraIntegration = {
     }
 
     const issues: JiraExportResult["issues"] = [];
+    const ticketFormatPreset = input.ticketFormatPreset ?? "enterprise";
+    const ticketDetails = input.ticketDetails ?? {};
+    const sites = await this.listSites();
+    const siteUrl = sites.find((site) => site.id === input.cloudId)?.url ?? "";
 
     for (const action of meeting.actions) {
       const createIssue = async (withPriority: boolean) =>
@@ -235,15 +311,32 @@ export const jiraIntegration = {
           body: JSON.stringify({
             fields: {
               project: { key: input.projectKey },
-              summary: action.description,
-              issuetype: { name: "Task" },
+              summary: buildTicketSummary({
+                format: ticketFormatPreset,
+                meetingTitle: meeting.meeting.title,
+                actionDescription: action.description,
+                ownerEmail: action.ownerEmail,
+                priority: action.priority,
+              }),
+              issuetype: { name: ticketDetails.issueType?.trim() || "Task" },
               description: toAdfDescription({
+                format: ticketFormatPreset,
                 meetingTitle: meeting.meeting.title,
                 ownerEmail: action.ownerEmail,
                 priority: action.priority,
                 dueDate: action.dueDate,
+                actionDescription: action.description,
+                decisions: meeting.summary?.decisions,
+                risks: meeting.summary?.risks,
+                notes: meeting.summary?.notes,
+                environment: ticketDetails.environment,
+                additionalContext: ticketDetails.additionalContext,
                 transcript: meeting.transcript?.text.slice(0, 200),
               }),
+              ...(ticketDetails.labels && ticketDetails.labels.length > 0 ? { labels: ticketDetails.labels } : {}),
+              ...(ticketDetails.components && ticketDetails.components.length > 0
+                ? { components: ticketDetails.components.map((component) => ({ name: component })) }
+                : {}),
               ...(action.dueDate ? { duedate: action.dueDate } : {}),
               ...(withPriority
                 ? {
@@ -252,6 +345,7 @@ export const jiraIntegration = {
                     },
                   }
                 : {}),
+              ...(ticketDetails.advancedFields ?? {}),
             },
           }),
         });
@@ -269,7 +363,7 @@ export const jiraIntegration = {
       issues.push({
         actionId: action.id,
         key: created.key,
-        url: `${(await this.listSites()).find((site) => site.id === input.cloudId)?.url ?? ""}/browse/${created.key}`,
+        url: `${siteUrl}/browse/${created.key}`,
       });
     }
 

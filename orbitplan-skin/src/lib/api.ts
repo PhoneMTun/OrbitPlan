@@ -228,6 +228,15 @@ export const exportMeetingToJira = async (payload: {
   meetingId: string;
   cloudId: string;
   projectKey: string;
+  ticketFormatPreset?: "enterprise" | "engineering" | "operations" | "compliance";
+  ticketDetails?: {
+    issueType?: string;
+    labels?: string[];
+    components?: string[];
+    environment?: string;
+    additionalContext?: string;
+    advancedFields?: Record<string, unknown>;
+  };
 }): Promise<JiraExportResult> => {
   const response = await apiFetch(`${config.apiBaseUrl}/api/integrations/jira/export`, {
     method: "POST",

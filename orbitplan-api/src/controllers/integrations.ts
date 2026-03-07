@@ -6,6 +6,17 @@ const JiraExportSchema = z.object({
   meetingId: z.string().uuid(),
   cloudId: z.string().min(1),
   projectKey: z.string().min(1),
+  ticketFormatPreset: z.enum(["enterprise", "engineering", "operations", "compliance"]).optional(),
+  ticketDetails: z
+    .object({
+      issueType: z.string().min(1).optional(),
+      labels: z.array(z.string().min(1)).optional(),
+      components: z.array(z.string().min(1)).optional(),
+      environment: z.string().optional(),
+      additionalContext: z.string().optional(),
+      advancedFields: z.record(z.string(), z.unknown()).optional(),
+    })
+    .optional(),
 });
 
 const handleJiraError = (res: Response, error: unknown) => {

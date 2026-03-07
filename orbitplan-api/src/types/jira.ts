@@ -17,6 +17,17 @@ export type JiraProject = {
   name: string;
 };
 
+export type TicketFormatPreset = "enterprise" | "engineering" | "operations" | "compliance";
+
+export type JiraTicketDetails = {
+  issueType?: string;
+  labels?: string[];
+  components?: string[];
+  environment?: string;
+  additionalContext?: string;
+  advancedFields?: Record<string, unknown>;
+};
+
 export type JiraExportResult = {
   createdCount: number;
   issues: Array<{

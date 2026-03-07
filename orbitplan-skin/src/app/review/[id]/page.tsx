@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { Document, Packer, Paragraph, TextRun } from "docx";
 import { AnimatePresence, motion } from "framer-motion";
 import { jsPDF } from "jspdf";
@@ -41,7 +41,58 @@ const statusTone = (status: string): "neutral" | "success" | "warning" => {
 
 type WorkspaceTab = "summary" | "chat";
 type DownloadFormat = "txt" | "csv" | "pdf" | "docx";
+type TicketFormatPreset = "enterprise" | "engineering" | "operations" | "compliance";
+type SettingsPanelTab = "export-target" | "project" | "formats" | "fields" | "automation";
+type JiraTicketDetailsDraft = {
+  issueType: string;
+  labelsText: string;
+  componentsText: string;
+  environment: string;
+  additionalContext: string;
+  advancedFieldsJson: string;
+};
 const CHAT_PAGE_SIZE = 20;
+
+const TICKET_FORMAT_PRESETS: Array<{
+  id: TicketFormatPreset;
+  label: string;
+  description: string;
+  sections: string[];
+}> = [
+  {
+    id: "enterprise",
+    label: "Enterprise Standard",
+    description: "Balanced ticket structure for cross-functional teams with clear outcomes, ownership, and acceptance criteria.",
+    sections: ["Business outcome", "Scope", "Owner", "Acceptance criteria"],
+  },
+  {
+    id: "engineering",
+    label: "Engineering Delivery",
+    description: "Technical format for product and engineering teams with implementation notes, dependencies, and QA detail.",
+    sections: ["Implementation notes", "Dependencies", "QA checklist", "Release notes"],
+  },
+  {
+    id: "operations",
+    label: "Operations Handoff",
+    description: "Operational template focused on impact, urgency, support context, and execution readiness.",
+    sections: ["Operational impact", "Priority", "Runbook notes", "Stakeholders"],
+  },
+  {
+    id: "compliance",
+    label: "Compliance Audit",
+    description: "Controlled format for regulated workflows with approvals, evidence, risk statements, and rollback planning.",
+    sections: ["Control objective", "Risk", "Evidence", "Approval trail"],
+  },
+];
+
+const DEFAULT_JIRA_TICKET_DETAILS: JiraTicketDetailsDraft = {
+  issueType: "Task",
+  labelsText: "orbitplan",
+  componentsText: "",
+  environment: "",
+  additionalContext: "",
+  advancedFieldsJson: "",
+};
 
 const ACTION_STATUS_OPTIONS: Array<{ value: ActionStatus; label: string }> = [
   { value: "open", label: "Open" },
@@ -201,8 +252,21 @@ export default function ReviewPage() {
   const [activeSidebarTool, setActiveSidebarTool] = useState<ReviewSidebarTool | null>(null);
   const [activeTab, setActiveTab] = useState<WorkspaceTab>("summary");
   const [downloadFormat, setDownloadFormat] = useState<DownloadFormat>("txt");
+  const [ticketFormatPreset, setTicketFormatPreset] = useState<TicketFormatPreset>("enterprise");
+  const [settingsPanelTab, setSettingsPanelTab] = useState<SettingsPanelTab>("formats");
+  const [jiraTicketDetails, setJiraTicketDetails] = useState<JiraTicketDetailsDraft>(DEFAULT_JIRA_TICKET_DETAILS);
   const chatViewportRef = useRef<HTMLDivElement | null>(null);
   const hasSeededChatRef = useRef(false);
+  const selectedTicketFormat =
+    TICKET_FORMAT_PRESETS.find((preset) => preset.id === ticketFormatPreset) ?? TICKET_FORMAT_PRESETS[0];
+  const jiraLabels = jiraTicketDetails.labelsText
+    .split(",")
+    .map((label) => label.trim())
+    .filter(Boolean);
+  const jiraComponents = jiraTicketDetails.componentsText
+    .split(",")
+    .map((component) => component.trim())
+    .filter(Boolean);
   const platformSyncItems = [
     {
       name: "Jira",
@@ -665,6 +729,7 @@ export default function ReviewPage() {
           <input
             value={question}
             onChange={(event) => setQuestion(event.target.value)}
+            onKeyDown={handleQuestionKeyDown}
             placeholder="Ask about decisions, owners, risks, deadlines..."
             className="flex-1 rounded-xl border border-[var(--border)] bg-[var(--surface-strong)] px-3 py-2 text-sm text-[var(--text-primary)] outline-none focus:border-[var(--accent)]"
           />
@@ -679,6 +744,41 @@ export default function ReviewPage() {
   const renderTicketsPanel = () => (
     <Card title="Tickets" subtitle="Created issues and export state">
       <div className="space-y-4 text-sm text-[var(--text-secondary)]">
+        <div className="rounded-xl border border-[rgba(120,145,255,0.24)] bg-[linear-gradient(135deg,rgba(30,123,255,0.12)_0%,rgba(143,56,255,0.08)_60%,rgba(255,180,0,0.06)_100%)] p-3">
+          <p className="text-[10px] font-semibold uppercase tracking-[0.08em] text-[var(--text-muted)]">Active Ticket Format</p>
+          <div className="mt-2 flex items-start justify-between gap-3">
+            <div>
+              <p className="text-sm font-semibold text-[var(--text-primary)]">{selectedTicketFormat.label}</p>
+              <p className="mt-1 text-xs text-[var(--text-secondary)]">{selectedTicketFormat.description}</p>
+            </div>
+            <span className="rounded-full border border-[rgba(120,145,255,0.24)] bg-[rgba(255,255,255,0.04)] px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.08em] text-[var(--text-primary)]">
+              Active
+            </span>
+          </div>
+        </div>
+        <div className="rounded-xl border border-[var(--border)] bg-[var(--surface-strong)] p-3">
+          <p className="text-[10px] font-semibold uppercase tracking-[0.08em] text-[var(--text-muted)]">Ticket Field Profile</p>
+          <div className="mt-2 grid gap-3 md:grid-cols-2">
+            <div>
+              <p className="text-xs text-[var(--text-muted)]">Issue type</p>
+              <p className="text-sm font-semibold text-[var(--text-primary)]">{jiraTicketDetails.issueType || "Task"}</p>
+            </div>
+            <div>
+              <p className="text-xs text-[var(--text-muted)]">Labels</p>
+              <p className="text-sm font-semibold text-[var(--text-primary)]">{jiraLabels.join(", ") || "None"}</p>
+            </div>
+            <div>
+              <p className="text-xs text-[var(--text-muted)]">Components</p>
+              <p className="text-sm font-semibold text-[var(--text-primary)]">{jiraComponents.join(", ") || "None"}</p>
+            </div>
+            <div>
+              <p className="text-xs text-[var(--text-muted)]">Advanced fields</p>
+              <p className="text-sm font-semibold text-[var(--text-primary)]">
+                {jiraTicketDetails.advancedFieldsJson.trim() ? "Configured" : "None"}
+              </p>
+            </div>
+          </div>
+        </div>
         <div className="grid grid-cols-2 gap-3">
           <div className="rounded-xl border border-[var(--border)] bg-[var(--surface-strong)] p-3">
             <p className="text-[10px] font-semibold uppercase tracking-[0.08em] text-[var(--text-muted)]">Connected</p>
@@ -829,24 +929,265 @@ export default function ReviewPage() {
     );
   };
 
-  const renderSettingsPanel = () => (
-    <Card title="Settings" subtitle="Meeting-level working defaults">
-      <div className="space-y-3 text-sm text-[var(--text-secondary)]">
-        <div className="rounded-xl border border-[var(--border)] bg-[var(--surface-strong)] p-3">
-          <p className="font-semibold text-[var(--text-primary)]">Default Export Target</p>
-          <p className="mt-1">{jiraStatus?.connected ? "Jira connected and available" : "No export target connected yet"}</p>
+  const renderSettingsPanel = () => {
+    const settingsTabs: Array<{
+      id: SettingsPanelTab;
+      label: string;
+      eyebrow: string;
+      summary: string;
+    }> = [
+      {
+        id: "formats",
+        label: "Formats",
+        eyebrow: "Templates",
+        summary: "Choose the enterprise ticket structure used for exports.",
+      },
+      {
+        id: "export-target",
+        label: "Export Target",
+        eyebrow: "Destination",
+        summary: "See which delivery system is active for this meeting.",
+      },
+      {
+        id: "project",
+        label: "Project",
+        eyebrow: "Routing",
+        summary: "Control where approved actions are sent.",
+      },
+      {
+        id: "fields",
+        label: "Fields",
+        eyebrow: "Payload",
+        summary: "Set the Jira issue fields that should be sent on export.",
+      },
+      {
+        id: "automation",
+        label: "Automation",
+        eyebrow: "Workflow",
+        summary: "Manage future automation defaults for this meeting.",
+      },
+    ];
+
+    const renderSettingsContent = () => {
+      switch (settingsPanelTab) {
+        case "export-target":
+          return (
+            <div className="rounded-2xl border border-[var(--border)] bg-[var(--surface-strong)] p-4">
+              <p className="text-xs font-semibold uppercase tracking-[0.1em] text-[var(--text-muted)]">Default Export Target</p>
+              <p className="mt-3 text-lg font-semibold text-[var(--text-primary)]">
+                {jiraStatus?.connected ? "Jira connected and available" : "No export target connected yet"}
+              </p>
+              <p className="mt-2 text-sm text-[var(--text-secondary)]">
+                Ticket exports currently route through Jira when the integration is connected and a project is selected.
+              </p>
+            </div>
+          );
+        case "project":
+          return (
+            <div className="rounded-2xl border border-[var(--border)] bg-[var(--surface-strong)] p-4">
+              <p className="text-xs font-semibold uppercase tracking-[0.1em] text-[var(--text-muted)]">Preferred Project</p>
+              <p className="mt-3 text-lg font-semibold text-[var(--text-primary)]">{jiraProjectKey || "No Jira project selected yet"}</p>
+              <p className="mt-2 text-sm text-[var(--text-secondary)]">
+                Pick a Jira site and project from the Integrations area. This setting reflects the current meeting target.
+              </p>
+            </div>
+          );
+        case "fields":
+          return (
+            <div className="space-y-4 rounded-2xl border border-[rgba(120,145,255,0.24)] bg-[linear-gradient(135deg,rgba(30,123,255,0.08)_0%,rgba(143,56,255,0.08)_60%,rgba(255,180,0,0.05)_100%)] p-4">
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-[0.1em] text-[var(--text-muted)]">Ticket Fields</p>
+                <p className="mt-2 text-lg font-semibold text-[var(--text-primary)]">Jira field mapping</p>
+                <p className="mt-1 text-sm text-[var(--text-secondary)]">
+                  Control the Jira issue payload sent during export. Common fields are exposed directly, and advanced JSON can inject custom Jira fields.
+                </p>
+              </div>
+
+              <div className="grid gap-4 xl:grid-cols-2">
+                <label className="space-y-2">
+                  <span className="text-xs font-semibold uppercase tracking-[0.08em] text-[var(--text-muted)]">Issue Type</span>
+                  <input
+                    value={jiraTicketDetails.issueType}
+                    onChange={(event) =>
+                      setJiraTicketDetails((current) => ({ ...current, issueType: event.target.value }))
+                    }
+                    placeholder="Task"
+                    className="w-full rounded-xl border border-[var(--border)] bg-[var(--surface-strong)] px-3 py-2 text-sm text-[var(--text-primary)] outline-none focus:border-[var(--accent)]"
+                  />
+                </label>
+
+                <label className="space-y-2">
+                  <span className="text-xs font-semibold uppercase tracking-[0.08em] text-[var(--text-muted)]">Labels</span>
+                  <input
+                    value={jiraTicketDetails.labelsText}
+                    onChange={(event) =>
+                      setJiraTicketDetails((current) => ({ ...current, labelsText: event.target.value }))
+                    }
+                    placeholder="orbitplan, customer-facing"
+                    className="w-full rounded-xl border border-[var(--border)] bg-[var(--surface-strong)] px-3 py-2 text-sm text-[var(--text-primary)] outline-none focus:border-[var(--accent)]"
+                  />
+                </label>
+
+                <label className="space-y-2">
+                  <span className="text-xs font-semibold uppercase tracking-[0.08em] text-[var(--text-muted)]">Components</span>
+                  <input
+                    value={jiraTicketDetails.componentsText}
+                    onChange={(event) =>
+                      setJiraTicketDetails((current) => ({ ...current, componentsText: event.target.value }))
+                    }
+                    placeholder="Platform API, Admin UI"
+                    className="w-full rounded-xl border border-[var(--border)] bg-[var(--surface-strong)] px-3 py-2 text-sm text-[var(--text-primary)] outline-none focus:border-[var(--accent)]"
+                  />
+                </label>
+
+                <label className="space-y-2">
+                  <span className="text-xs font-semibold uppercase tracking-[0.08em] text-[var(--text-muted)]">Environment</span>
+                  <input
+                    value={jiraTicketDetails.environment}
+                    onChange={(event) =>
+                      setJiraTicketDetails((current) => ({ ...current, environment: event.target.value }))
+                    }
+                    placeholder="Production, staging, internal admin"
+                    className="w-full rounded-xl border border-[var(--border)] bg-[var(--surface-strong)] px-3 py-2 text-sm text-[var(--text-primary)] outline-none focus:border-[var(--accent)]"
+                  />
+                </label>
+              </div>
+
+              <label className="block space-y-2">
+                <span className="text-xs font-semibold uppercase tracking-[0.08em] text-[var(--text-muted)]">Additional Context</span>
+                <textarea
+                  value={jiraTicketDetails.additionalContext}
+                  onChange={(event) =>
+                    setJiraTicketDetails((current) => ({ ...current, additionalContext: event.target.value }))
+                  }
+                  rows={4}
+                  placeholder="Escalation notes, rollout constraints, customer impact, internal references..."
+                  className="w-full rounded-xl border border-[var(--border)] bg-[var(--surface-strong)] px-3 py-2 text-sm text-[var(--text-primary)] outline-none focus:border-[var(--accent)]"
+                />
+              </label>
+
+              <label className="block space-y-2">
+                <span className="text-xs font-semibold uppercase tracking-[0.08em] text-[var(--text-muted)]">Advanced Jira Fields JSON</span>
+                <textarea
+                  value={jiraTicketDetails.advancedFieldsJson}
+                  onChange={(event) =>
+                    setJiraTicketDetails((current) => ({ ...current, advancedFieldsJson: event.target.value }))
+                  }
+                  rows={8}
+                  placeholder={'{"customfield_10011":"ENG","customfield_10020":8}'}
+                  className="w-full rounded-xl border border-[var(--border)] bg-[rgba(7,12,30,0.7)] px-3 py-2 font-mono text-sm text-[var(--text-primary)] outline-none focus:border-[var(--accent)]"
+                />
+                <p className="text-xs text-[var(--text-secondary)]">
+                  Use this for custom Jira fields such as story points, team fields, epic links, request types, or any project-specific schema.
+                </p>
+              </label>
+            </div>
+          );
+        case "automation":
+          return (
+            <div className="rounded-2xl border border-[var(--border)] bg-[var(--surface-strong)] p-4">
+              <p className="text-xs font-semibold uppercase tracking-[0.1em] text-[var(--text-muted)]">Automation Toggles</p>
+              <p className="mt-3 text-lg font-semibold text-[var(--text-primary)]">Not wired yet</p>
+              <p className="mt-2 text-sm text-[var(--text-secondary)]">
+                Meeting-level automation controls are not wired yet in this workspace, but this tab leaves space for those defaults.
+              </p>
+            </div>
+          );
+        case "formats":
+        default:
+          return (
+            <div className="rounded-2xl border border-[rgba(120,145,255,0.24)] bg-[linear-gradient(135deg,rgba(30,123,255,0.1)_0%,rgba(143,56,255,0.08)_58%,rgba(255,180,0,0.05)_100%)] p-4">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <p className="text-xs font-semibold uppercase tracking-[0.1em] text-[var(--text-muted)]">Formats</p>
+                  <p className="mt-2 text-lg font-semibold text-[var(--text-primary)]">Ticket creation presets</p>
+                  <p className="mt-1 text-sm text-[var(--text-secondary)]">
+                    Choose how tickets should be structured when this meeting exports actions into Jira.
+                  </p>
+                </div>
+              </div>
+
+              <div className="mt-4 grid gap-3 xl:grid-cols-2">
+                {TICKET_FORMAT_PRESETS.map((preset) => {
+                  const isSelected = ticketFormatPreset === preset.id;
+                  return (
+                    <button
+                      key={preset.id}
+                      type="button"
+                      onClick={() => setTicketFormatPreset(preset.id)}
+                      className={`rounded-2xl border p-3 text-left transition ${
+                        isSelected
+                          ? "border-[rgba(56,255,179,0.42)] bg-[rgba(56,255,179,0.12)] shadow-[0_16px_30px_-24px_rgba(56,255,179,0.8)]"
+                          : "border-[rgba(120,145,255,0.2)] bg-[rgba(7,12,30,0.45)] hover:border-[rgba(120,145,255,0.36)]"
+                      }`}
+                    >
+                      <div className="flex items-start justify-between gap-3">
+                        <div>
+                          <p className="text-sm font-semibold text-[var(--text-primary)]">{preset.label}</p>
+                          <p className="mt-1 text-xs text-[var(--text-secondary)]">{preset.description}</p>
+                        </div>
+                        <span
+                          className={`rounded-full px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.08em] ${
+                            isSelected
+                              ? "border border-[rgba(56,255,179,0.32)] bg-[rgba(56,255,179,0.14)] text-[var(--success)]"
+                              : "border border-[rgba(120,145,255,0.2)] bg-[rgba(255,255,255,0.04)] text-[var(--text-muted)]"
+                          }`}
+                        >
+                          {isSelected ? "Selected" : "Preset"}
+                        </span>
+                      </div>
+
+                      <div className="mt-3 flex flex-wrap gap-2">
+                        {preset.sections.map((section) => (
+                          <span
+                            key={section}
+                            className="rounded-full border border-[rgba(120,145,255,0.18)] bg-[rgba(255,255,255,0.04)] px-2.5 py-1 text-[10px] font-medium uppercase tracking-[0.06em] text-[var(--text-secondary)]"
+                          >
+                            {section}
+                          </span>
+                        ))}
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          );
+      }
+    };
+
+    return (
+      <Card title="Settings" subtitle="Meeting-level working defaults">
+        <div className="grid gap-4 lg:grid-cols-[220px_minmax(0,1fr)]">
+          <div className="rounded-2xl border border-[rgba(120,145,255,0.18)] bg-[rgba(255,255,255,0.03)] p-2">
+            <div className="space-y-2">
+              {settingsTabs.map((tab) => {
+                const isActive = settingsPanelTab === tab.id;
+                return (
+                  <button
+                    key={tab.id}
+                    type="button"
+                    onClick={() => setSettingsPanelTab(tab.id)}
+                    className={`w-full rounded-2xl border px-3 py-3 text-left transition ${
+                      isActive
+                        ? "border-[rgba(56,255,179,0.32)] bg-[rgba(56,255,179,0.12)] shadow-[0_16px_28px_-24px_rgba(56,255,179,0.8)]"
+                        : "border-transparent bg-[rgba(7,12,30,0.34)] hover:border-[rgba(120,145,255,0.24)] hover:bg-[rgba(255,255,255,0.04)]"
+                    }`}
+                  >
+                    <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-[var(--text-muted)]">{tab.eyebrow}</p>
+                    <p className="mt-1 text-sm font-semibold text-[var(--text-primary)]">{tab.label}</p>
+                    <p className="mt-1 text-xs text-[var(--text-secondary)]">{tab.summary}</p>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          <div className="min-w-0">{renderSettingsContent()}</div>
         </div>
-        <div className="rounded-xl border border-[var(--border)] bg-[var(--surface-strong)] p-3">
-          <p className="font-semibold text-[var(--text-primary)]">Preferred Project</p>
-          <p className="mt-1">{jiraProjectKey || "No Jira project selected yet"}</p>
-        </div>
-        <div className="rounded-xl border border-[var(--border)] bg-[var(--surface-strong)] p-3">
-          <p className="font-semibold text-[var(--text-primary)]">Automation Toggles</p>
-          <p className="mt-1">Meeting-level automation controls are not wired yet in this workspace.</p>
-        </div>
-      </div>
-    </Card>
-  );
+      </Card>
+    );
+  };
 
   useEffect(() => {
     let isMounted = true;
@@ -881,6 +1222,44 @@ export default function ReviewPage() {
       isMounted = false;
     };
   }, [id]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const storedValue = window.localStorage.getItem(`orbitplan:ticket-format:${id}`);
+    if (!storedValue) return;
+    if (TICKET_FORMAT_PRESETS.some((preset) => preset.id === storedValue)) {
+      setTicketFormatPreset(storedValue as TicketFormatPreset);
+    }
+  }, [id]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(`orbitplan:ticket-format:${id}`, ticketFormatPreset);
+  }, [id, ticketFormatPreset]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const storedValue = window.localStorage.getItem(`orbitplan:jira-ticket-details:${id}`);
+    if (!storedValue) return;
+    try {
+      const parsed = JSON.parse(storedValue) as Partial<JiraTicketDetailsDraft>;
+      setJiraTicketDetails({
+        issueType: parsed.issueType?.trim() || DEFAULT_JIRA_TICKET_DETAILS.issueType,
+        labelsText: parsed.labelsText ?? DEFAULT_JIRA_TICKET_DETAILS.labelsText,
+        componentsText: parsed.componentsText ?? DEFAULT_JIRA_TICKET_DETAILS.componentsText,
+        environment: parsed.environment ?? DEFAULT_JIRA_TICKET_DETAILS.environment,
+        additionalContext: parsed.additionalContext ?? DEFAULT_JIRA_TICKET_DETAILS.additionalContext,
+        advancedFieldsJson: parsed.advancedFieldsJson ?? DEFAULT_JIRA_TICKET_DETAILS.advancedFieldsJson,
+      });
+    } catch {
+      window.localStorage.removeItem(`orbitplan:jira-ticket-details:${id}`);
+    }
+  }, [id]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(`orbitplan:jira-ticket-details:${id}`, JSON.stringify(jiraTicketDetails));
+  }, [id, jiraTicketDetails]);
 
   const loadJiraState = async () => {
     setJiraLoading(true);
@@ -1028,6 +1407,12 @@ export default function ReviewPage() {
     }
   };
 
+  const handleQuestionKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
+    if (event.key !== "Enter" || event.shiftKey) return;
+    event.preventDefault();
+    void handleAsk();
+  };
+
   const handleLoadOlderMessages = async () => {
     if (!data || !chatCursor || chatHistoryLoading) return;
     setChatHistoryLoading(true);
@@ -1125,10 +1510,28 @@ export default function ReviewPage() {
     setError(null);
     setJiraResult(null);
     try {
+      let advancedFields: Record<string, unknown> | undefined;
+      if (jiraTicketDetails.advancedFieldsJson.trim()) {
+        const parsed = JSON.parse(jiraTicketDetails.advancedFieldsJson) as unknown;
+        if (!parsed || Array.isArray(parsed) || typeof parsed !== "object") {
+          throw new Error("Advanced Jira fields must be a JSON object.");
+        }
+        advancedFields = parsed as Record<string, unknown>;
+      }
+
       const result = await exportMeetingToJira({
         meetingId: data.meeting.id,
         cloudId: jiraCloudId,
         projectKey: jiraProjectKey,
+        ticketFormatPreset,
+        ticketDetails: {
+          issueType: jiraTicketDetails.issueType.trim() || "Task",
+          labels: jiraLabels,
+          components: jiraComponents,
+          environment: jiraTicketDetails.environment.trim() || undefined,
+          additionalContext: jiraTicketDetails.additionalContext.trim() || undefined,
+          advancedFields,
+        },
       });
       setJiraResult(result);
     } catch (jiraError) {
@@ -1292,36 +1695,6 @@ export default function ReviewPage() {
       modalWidth: "max-w-2xl",
     },
     {
-      id: "transcript",
-      title: "Transcript",
-      icon: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" className="h-5 w-5"><path d="M6 5h12v14H6z" /><path d="M9 9h6" /><path d="M9 13h6" /><path d="M9 17h4" /></svg>,
-      activeClass: "border-[rgba(255,213,106,0.48)] bg-[linear-gradient(145deg,rgba(255,213,106,0.22)_0%,rgba(30,123,255,0.2)_68%,rgba(143,56,255,0.14)_100%)]",
-      idleClass: "border-[rgba(120,145,255,0.24)] bg-[rgba(255,255,255,0.03)] hover:border-[rgba(255,213,106,0.36)]",
-      modalTitle: "Transcript",
-      modalSubtitle: "Read the full transcript and export it in the format you need.",
-      modalWidth: "max-w-4xl",
-    },
-    {
-      id: "summary",
-      title: "Summary",
-      icon: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" className="h-5 w-5"><path d="M6 7h12" /><path d="M6 12h12" /><path d="M6 17h8" /></svg>,
-      activeClass: "border-[rgba(120,145,255,0.44)] bg-[linear-gradient(145deg,rgba(30,123,255,0.24)_0%,rgba(143,56,255,0.2)_68%,rgba(255,255,255,0.08)_100%)]",
-      idleClass: "border-[rgba(120,145,255,0.24)] bg-[rgba(255,255,255,0.03)] hover:border-[rgba(120,145,255,0.42)]",
-      modalTitle: "Summary",
-      modalSubtitle: "Decisions, risks, and notes without taking space in the main layout.",
-      modalWidth: "max-w-2xl",
-    },
-    {
-      id: "chat",
-      title: "Chat",
-      icon: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" className="h-5 w-5"><path d="M5 7h14v10H9l-4 3V7Z" /></svg>,
-      activeClass: "border-[rgba(143,56,255,0.5)] bg-[linear-gradient(145deg,rgba(143,56,255,0.26)_0%,rgba(30,123,255,0.18)_68%,rgba(255,255,255,0.08)_100%)]",
-      idleClass: "border-[rgba(120,145,255,0.24)] bg-[rgba(255,255,255,0.03)] hover:border-[rgba(143,56,255,0.4)]",
-      modalTitle: "Chat",
-      modalSubtitle: "Open the meeting assistant in a focused popup.",
-      modalWidth: "max-w-4xl",
-    },
-    {
       id: "tickets",
       title: "Tickets",
       icon: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" className="h-5 w-5"><path d="M7 8h10v8H7z" /><path d="M10 8V6" /><path d="M14 8V6" /></svg>,
@@ -1349,16 +1722,6 @@ export default function ReviewPage() {
       idleClass: "border-[rgba(120,145,255,0.24)] bg-[rgba(255,255,255,0.03)] hover:border-[rgba(120,145,255,0.42)]",
       modalTitle: "Files",
       modalSubtitle: "Uploaded media, transcript artifacts, and generated outputs.",
-      modalWidth: "max-w-3xl",
-    },
-    {
-      id: "timeline",
-      title: "Timeline",
-      icon: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" className="h-5 w-5"><path d="M6 6h12" /><path d="M12 6v12" /><path d="M8 18h8" /></svg>,
-      activeClass: "border-[rgba(255,213,106,0.42)] bg-[linear-gradient(145deg,rgba(255,213,106,0.2)_0%,rgba(255,255,255,0.06)_68%,rgba(30,123,255,0.12)_100%)]",
-      idleClass: "border-[rgba(120,145,255,0.24)] bg-[rgba(255,255,255,0.03)] hover:border-[rgba(255,213,106,0.36)]",
-      modalTitle: "Timeline",
-      modalSubtitle: "Track the lifecycle of this meeting from capture to delivery.",
       modalWidth: "max-w-3xl",
     },
     {
@@ -1445,7 +1808,7 @@ export default function ReviewPage() {
           </div>
         }
         sidebarCollapsedContent={
-          <div className="flex flex-col items-center gap-4 overflow-y-auto pt-2">
+          <div className="flex flex-col items-center gap-4 overflow-y-auto px-1 pt-2">
             {sidebarTools.map((tool) => {
               const isActive = activeSidebarTool === tool.id;
               return (
@@ -1453,14 +1816,16 @@ export default function ReviewPage() {
                   key={tool.id}
                   type="button"
                   onClick={() => setActiveSidebarTool(tool.id)}
-                  className={`group relative flex h-16 w-16 items-center justify-center rounded-[24px] border transition ${
+                  className={`group relative flex h-16 w-16 shrink-0 items-center justify-center rounded-[24px] border transition ${
                     isActive ? tool.activeClass : tool.idleClass
                   }`}
                   aria-label={`Open ${tool.title}`}
                   title={tool.title}
                 >
                   <div className="absolute inset-1 rounded-[20px] border border-[rgba(255,255,255,0.08)] bg-[rgba(4,9,24,0.28)]" />
-                  <div className="relative z-10 text-[var(--text-primary)]">{tool.icon}</div>
+                  <div className="relative z-10 flex h-10 w-10 items-center justify-center rounded-2xl border border-[rgba(120,145,255,0.2)] bg-[rgba(255,255,255,0.04)] text-[var(--text-primary)] shadow-[0_12px_24px_-18px_rgba(0,0,0,0.85)]">
+                    {tool.icon}
+                  </div>
                 </button>
               );
             })}
@@ -1642,6 +2007,7 @@ export default function ReviewPage() {
                           <input
                             value={question}
                             onChange={(event) => setQuestion(event.target.value)}
+                            onKeyDown={handleQuestionKeyDown}
                             placeholder="Ask about decisions, owners, risks, deadlines..."
                             className="flex-1 rounded-xl border border-[var(--border)] bg-[var(--surface-strong)] px-3 py-2 text-sm text-[var(--text-primary)] outline-none focus:border-[var(--accent)]"
                           />

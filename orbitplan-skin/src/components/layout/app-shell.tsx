@@ -143,7 +143,7 @@ export function AppShell({
       <div className="mx-auto flex min-h-[calc(100vh-81px)] w-full max-w-7xl gap-0 px-3 py-3 sm:px-4 lg:px-6">
         {showSidebar && (
           <motion.aside
-            animate={{ width: resolvedSidebarOpen ? 288 : 92 }}
+            animate={{ width: resolvedSidebarOpen ? 288 : 108 }}
             transition={{ type: "spring", stiffness: 280, damping: 30 }}
             className="sticky top-3 hidden h-[calc(100vh-1.5rem)] shrink-0 overflow-hidden rounded-[28px] border border-[rgba(120,145,255,0.22)] bg-[linear-gradient(180deg,rgba(8,12,31,0.96)_0%,rgba(7,10,24,0.94)_100%)] shadow-[0_24px_60px_-36px_rgba(0,0,0,0.85)] lg:block"
           >
@@ -161,7 +161,11 @@ export function AppShell({
                 </button>
               </div>
 
-              <div className={`mt-4 flex-1 rounded-2xl border border-dashed border-[rgba(120,145,255,0.2)] bg-[rgba(255,255,255,0.02)] ${resolvedSidebarOpen ? "p-4" : "p-2"}`}>
+              <div
+                className={`mt-4 flex-1 rounded-2xl border border-dashed border-[rgba(120,145,255,0.2)] bg-[rgba(255,255,255,0.02)] ${
+                  resolvedSidebarOpen ? "p-4" : "p-3"
+                }`}
+              >
                 {resolvedSidebarOpen && sidebarContent ? (
                   sidebarContent
                 ) : !resolvedSidebarOpen && sidebarCollapsedContent ? (
@@ -181,7 +185,7 @@ export function AppShell({
               <div className="space-y-3 rounded-2xl border border-[rgba(120,145,255,0.18)] bg-[rgba(255,255,255,0.03)] p-3">
                 {user ? (
                   <>
-                    <div className={`rounded-2xl border border-[rgba(120,145,255,0.2)] bg-[linear-gradient(135deg,rgba(30,123,255,0.14)_0%,rgba(143,56,255,0.12)_65%,rgba(255,180,0,0.08)_100%)] ${resolvedSidebarOpen ? "p-3" : "p-2"}`}>
+                    <div className="rounded-2xl border border-[rgba(120,145,255,0.2)] bg-[linear-gradient(135deg,rgba(30,123,255,0.14)_0%,rgba(143,56,255,0.12)_65%,rgba(255,180,0,0.08)_100%)] p-3">
                       <div className={`flex ${resolvedSidebarOpen ? "items-start gap-3" : "justify-center"}`}>
                         <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-[linear-gradient(135deg,var(--accent)_0%,var(--accent-strong)_100%)] text-sm font-bold text-white shadow-[0_10px_24px_-16px_rgba(30,123,255,0.8)]">
                           {getUserInitials(user.email)}
