@@ -18,6 +18,7 @@ const JiraExportSchema = z.object({
     })
     .optional(),
 });
+const JiraScanSchema = JiraExportSchema;
 
 const handleJiraError = (res: Response, error: unknown) => {
   if (error instanceof JiraIntegrationError) {
@@ -29,6 +30,14 @@ const handleJiraError = (res: Response, error: unknown) => {
 export const getJiraStatusHandler = async (_req: Request, res: Response) => {
   try {
     return res.status(200).json(await jiraIntegration.getStatus());
+  } catch (error) {
+    return handleJiraError(res, error);
+  }
+};
+
+export const disconnectJiraHandler = async (_req: Request, res: Response) => {
+  try {
+    return res.status(200).json(await jiraIntegration.disconnect());
   } catch (error) {
     return handleJiraError(res, error);
   }
@@ -91,6 +100,47 @@ export const listJiraProjectsHandler = async (req: Request, res: Response) => {
   }
 };
 
+export const getJiraCreateMetaHandler = async (req: Request, res: Response) => {
+  const cloudId = typeof req.query.cloudId === "string" ? req.query.cloudId : undefined;
+  const projectKey = typeof req.query.projectKey === "string" ? req.query.projectKey : undefined;
+  if (!cloudId || !projectKey) {
+    return res.status(400).json({ error: "cloudId and projectKey are required" });
+  }
+
+  try {
+    return res.status(200).json({ issueTypes: await jiraIntegration.getCreateMeta(cloudId, projectKey) });
+  } catch (error) {
+    return handleJiraError(res, error);
+  }
+};
+
+export const getJiraLookupHandler = async (req: Request, res: Response) => {
+  const cloudId = typeof req.query.cloudId === "string" ? req.query.cloudId : undefined;
+  const projectKey = typeof req.query.projectKey === "string" ? req.query.projectKey : undefined;
+  const query = typeof req.query.query === "string" ? req.query.query : undefined;
+  const kind = typeof req.query.kind === "string" ? req.query.kind : undefined;
+  if (!cloudId || !projectKey || !query || !kind) {
+    return res.status(400).json({ error: "cloudId, projectKey, query, and kind are required" });
+  }
+
+  try {
+    switch (kind) {
+      case "user":
+        return res.status(200).json({ items: await jiraIntegration.lookupUsers(cloudId, projectKey, query) });
+      case "issue":
+        return res.status(200).json({ items: await jiraIntegration.lookupIssues(cloudId, projectKey, query) });
+      case "epic":
+        return res.status(200).json({ items: await jiraIntegration.lookupEpics(cloudId, projectKey, query) });
+      case "sprint":
+        return res.status(200).json({ items: await jiraIntegration.lookupSprints(cloudId, projectKey, query) });
+      default:
+        return res.status(400).json({ error: "Unsupported lookup kind" });
+    }
+  } catch (error) {
+    return handleJiraError(res, error);
+  }
+};
+
 export const exportMeetingToJiraHandler = async (req: Request, res: Response) => {
   const parsed = JiraExportSchema.safeParse(req.body);
   if (!parsed.success) {
@@ -99,6 +149,19 @@ export const exportMeetingToJiraHandler = async (req: Request, res: Response) =>
 
   try {
     return res.status(200).json(await jiraIntegration.exportMeetingActions(parsed.data));
+  } catch (error) {
+    return handleJiraError(res, error);
+  }
+};
+
+export const scanMeetingToJiraHandler = async (req: Request, res: Response) => {
+  const parsed = JiraScanSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ error: "Invalid request", details: parsed.error.flatten() });
+  }
+
+  try {
+    return res.status(200).json(await jiraIntegration.scanMeetingActions(parsed.data));
   } catch (error) {
     return handleJiraError(res, error);
   }

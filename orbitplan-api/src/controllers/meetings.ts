@@ -18,6 +18,7 @@ import {
 } from "../storage/meetingsStore.js";
 import { createAnalysisProvider } from "../services/analysis/index.js";
 import { createMeetingChatProvider } from "../services/chat/index.js";
+import { JiraIntegrationError, jiraIntegration } from "../services/integrations/jira.js";
 import { createTranscriptionProvider } from "../services/transcription/index.js";
 import { env } from "../config/env.js";
 
@@ -139,6 +140,14 @@ export const createMeetingHandler = async (req: Request, res: Response) => {
 };
 
 export const getMeetingHandler = async (req: Request, res: Response) => {
+  try {
+    await jiraIntegration.syncMeetingActions(req.params.id);
+  } catch (error) {
+    if (!(error instanceof JiraIntegrationError) || error.status === 404) {
+      // Fall back to local state when Jira sync is unavailable.
+    }
+  }
+
   const data = await getMeetingById(req.params.id);
   if (!data) {
     return res.status(404).json({ error: "Meeting not found" });
@@ -334,7 +343,49 @@ export const updateMeetingActionHandler = async (req: Request, res: Response) =>
     return res.status(404).json({ error: updated.error });
   }
 
-  return res.status(200).json(updated);
+  const action = updated.actions.find((item) => item.id === req.params.actionId);
+  if (action?.jiraIssueKey && action.jiraCloudId) {
+    try {
+      await jiraIntegration.syncActionToJira(action);
+      await jiraIntegration.syncMeetingActions(req.params.id);
+    } catch (error) {
+      return res.status(502).json({
+        error: "Jira sync failed",
+        details: error instanceof Error ? error.message : "Unknown Jira sync error",
+      });
+    }
+  }
+
+  const refreshed = await getMeetingById(req.params.id);
+  return res.status(200).json(refreshed ?? updated);
+};
+
+export const resyncMeetingActionHandler = async (req: Request, res: Response) => {
+  const meeting = await getMeetingById(req.params.id);
+  if (!meeting) {
+    return res.status(404).json({ error: "Meeting not found" });
+  }
+
+  const action = meeting.actions.find((item) => item.id === req.params.actionId);
+  if (!action) {
+    return res.status(404).json({ error: "Action not found" });
+  }
+  if (!action.jiraIssueKey || !action.jiraCloudId) {
+    return res.status(409).json({ error: "Action is not linked to Jira" });
+  }
+
+  try {
+    await jiraIntegration.syncActionToJira(action);
+    await jiraIntegration.syncMeetingActions(req.params.id);
+  } catch (error) {
+    return res.status(502).json({
+      error: "Jira resync failed",
+      details: error instanceof Error ? error.message : "Unknown Jira resync error",
+    });
+  }
+
+  const refreshed = await getMeetingById(req.params.id);
+  return res.status(200).json(refreshed ?? meeting);
 };
 
 export const deleteMeetingActionHandler = async (req: Request, res: Response) => {

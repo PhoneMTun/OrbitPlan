@@ -1,7 +1,7 @@
 import OpenAI from "openai";
 import { z } from "zod";
 import { env } from "../../config/env.js";
-import { extractActionsFromTranscript, generateStarterActionsFromIntent } from "./actionExtraction.js";
+import { extractActionsFromTranscript, finalizeActions, generateStarterActionsFromIntent } from "./actionExtraction.js";
 import type { AnalysisInput, AnalysisProvider, AnalysisResult } from "./types.js";
 
 const isoDateRegex = /^\d{4}-\d{2}-\d{2}$/;
@@ -32,7 +32,7 @@ const guessOwnerEmail = (description: string, attendees: string[]): string | und
 
 const normalizeActions = (actions: Array<{ description: string; ownerEmail?: string; dueDate?: string; confidence: number }>, attendees: string[]) => {
   const dedupe = new Set<string>();
-  const normalized = actions
+  return actions
     .map((action) => {
       const description = action.description.trim();
       const ownerEmail =
@@ -51,9 +51,6 @@ const normalizeActions = (actions: Array<{ description: string; ownerEmail?: str
       dedupe.add(key);
       return true;
     });
-
-  if (normalized.length > 0) return normalized;
-  return [];
 };
 
 const fallbackAnalysis = (input: AnalysisInput): AnalysisResult => {
@@ -65,7 +62,7 @@ const fallbackAnalysis = (input: AnalysisInput): AnalysisResult => {
     decisions: toBulletBlock([decision ?? ""], "No clear decision detected. Review transcript."),
     risks: "Review action owners and due dates before approval.",
     notes: buildStructuredNotes(input.transcript.slice(0, 320), nextSteps),
-    actions: normalizeActions(extractedActions.length > 0 ? extractedActions : starterActions, input.attendees),
+    actions: finalizeActions(normalizeActions(extractedActions, input.attendees), normalizeActions(starterActions, input.attendees), input.attendees),
   };
 };
 
@@ -101,7 +98,7 @@ export class OpenAiAnalysisProvider implements AnalysisProvider {
   async analyze(input: AnalysisInput): Promise<AnalysisResult> {
     const completion = await this.client.chat.completions.create({
       model: "gpt-4o-mini",
-      temperature: 0.2,
+      temperature: 0,
       response_format: { type: "json_object" },
       messages: [
         {
@@ -116,6 +113,10 @@ export class OpenAiAnalysisProvider implements AnalysisProvider {
             "- actions: array of { description, ownerEmail?, dueDate?, confidence }",
             "Rules:",
             "- Extract only what is supported by transcript context.",
+            "- Return 3 to 5 actions total.",
+            "- Prefer the strongest concrete commitments over exhaustive coverage.",
+            "- Combine closely related tasks into one action instead of splitting them into multiple tickets.",
+            "- Do not create duplicate or overlapping actions.",
             "- Owner should map to attendee emails whenever possible.",
             "- dueDate must be YYYY-MM-DD when present.",
             "- confidence must be between 0 and 1.",
@@ -171,8 +172,8 @@ export class OpenAiAnalysisProvider implements AnalysisProvider {
       decisions,
       risks,
       notes,
-      actions: (() => {
-        const normalized = normalizeActions(
+      actions: finalizeActions(
+        normalizeActions(
           parsed.data.actions.map((action) => ({
             description: action.description,
             ownerEmail: action.ownerEmail ?? undefined,
@@ -180,13 +181,10 @@ export class OpenAiAnalysisProvider implements AnalysisProvider {
             confidence: action.confidence,
           })),
           input.attendees,
-        );
-        if (normalized.length > 0) return normalized;
-        return normalizeActions(
-          generateStarterActionsFromIntent(input.transcript, input.attendees, input.meetingTitle),
-          input.attendees,
-        );
-      })(),
+        ),
+        normalizeActions(generateStarterActionsFromIntent(input.transcript, input.attendees, input.meetingTitle), input.attendees),
+        input.attendees,
+      ),
     };
   }
 }

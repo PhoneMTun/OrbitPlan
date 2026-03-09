@@ -32,6 +32,12 @@ enum ActionPriority {
   high
 }
 
+enum JiraSyncStatus {
+  not_linked
+  synced
+  sync_failed
+}
+
 enum EmailLogType {
   summary
   action
@@ -107,11 +113,18 @@ model ActionItem {
   confidence  Float
   status      ActionStatus
   priority    ActionPriority
+  jiraIssueKey String?
+  jiraIssueUrl String?
+  jiraCloudId  String?
+  jiraProjectKey String?
+  jiraSyncStatus JiraSyncStatus @default(not_linked)
+  jiraSyncError String?
   createdAt   DateTime       @default(now())
 
   meeting     Meeting        @relation(fields: [meetingId], references: [id], onDelete: Cascade)
 
   @@index([meetingId, createdAt])
+  @@unique([jiraIssueKey])
 }
 
 model EmailLog {

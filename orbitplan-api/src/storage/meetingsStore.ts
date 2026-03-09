@@ -1,9 +1,9 @@
 import crypto from "node:crypto";
-import type { Prisma } from "@prisma/client";
+import { Prisma } from "@prisma/client";
 import { prisma } from "../lib/prisma.js";
 import type { Meeting } from "../types/meeting.js";
 import type { MeetingFile } from "../types/file.js";
-import type { ActionItem, ActionPriority, ActionStatus } from "../types/action.js";
+import type { ActionItem, ActionPriority, ActionStatus, JiraSyncStatus } from "../types/action.js";
 import type { MeetingSummary } from "../types/summary.js";
 import type { EmailLog } from "../types/emailLog.js";
 import type { MeetingTranscript } from "../types/transcript.js";
@@ -11,20 +11,20 @@ import type { MeetingChatMessage } from "../types/chatMessage.js";
 import type { MeetingCreateDTO } from "../dto/meetings.js";
 import type { AnalysisResult } from "../services/analysis/types.js";
 
-const meetingInclude = {
+const meetingInclude = Prisma.validator<Prisma.MeetingInclude>()({
   files: true,
   transcript: true,
   summary: true,
   actions: {
-    orderBy: { createdAt: "asc" as const },
+    orderBy: [{ createdAt: "asc" }, { id: "asc" }],
   },
   emailLogs: {
-    orderBy: { sentAt: "asc" as const },
+    orderBy: { sentAt: "asc" },
   },
   chatMessages: {
-    orderBy: { createdAt: "asc" as const },
+    orderBy: { createdAt: "asc" },
   },
-} as const;
+});
 
 type MeetingRecord = Prisma.MeetingGetPayload<{
   include: typeof meetingInclude;
@@ -99,6 +99,12 @@ const mapAction = (action: {
   confidence: number;
   status: ActionStatus;
   priority: ActionPriority;
+  jiraIssueKey: string | null;
+  jiraIssueUrl: string | null;
+  jiraCloudId: string | null;
+  jiraProjectKey: string | null;
+  jiraSyncStatus: JiraSyncStatus;
+  jiraSyncError: string | null;
   createdAt: Date;
 }): ActionItem => ({
   id: action.id,
@@ -109,6 +115,12 @@ const mapAction = (action: {
   confidence: action.confidence,
   status: action.status,
   priority: action.priority,
+  jiraIssueKey: action.jiraIssueKey ?? undefined,
+  jiraIssueUrl: action.jiraIssueUrl ?? undefined,
+  jiraCloudId: action.jiraCloudId ?? undefined,
+  jiraProjectKey: action.jiraProjectKey ?? undefined,
+  jiraSyncStatus: action.jiraSyncStatus,
+  jiraSyncError: action.jiraSyncError ?? undefined,
   createdAt: action.createdAt.toISOString(),
 });
 
@@ -276,6 +288,12 @@ export const processMeeting = async (meetingId: string, transcriptText: string, 
           confidence: action.confidence,
           status: "open",
           priority: "medium",
+          jiraIssueKey: null,
+          jiraIssueUrl: null,
+          jiraCloudId: null,
+          jiraProjectKey: null,
+          jiraSyncStatus: "not_linked",
+          jiraSyncError: null,
           createdAt: new Date(),
         })),
       });
@@ -475,6 +493,12 @@ export const confirmMeetingActions = async (meetingId: string, confirmed: boolea
         confidence: 0.7,
         status: "open",
         priority: "medium",
+        jiraIssueKey: null,
+        jiraIssueUrl: null,
+        jiraCloudId: null,
+        jiraProjectKey: null,
+        jiraSyncStatus: "not_linked",
+        jiraSyncError: null,
       },
     });
     await tx.meeting.update({
@@ -484,4 +508,49 @@ export const confirmMeetingActions = async (meetingId: string, confirmed: boolea
   });
 
   return getMeetingById(meetingId);
+};
+
+export const linkActionToJiraIssue = async (
+  actionId: string,
+  input: { jiraIssueKey: string; jiraIssueUrl: string; jiraCloudId: string; jiraProjectKey: string },
+) => {
+  const updated = await prisma.actionItem.update({
+    where: { id: actionId },
+    data: {
+      ...input,
+      jiraSyncStatus: "synced",
+      jiraSyncError: null,
+    },
+  });
+  return mapAction(updated);
+};
+
+export const setActionJiraSyncState = async (
+  actionId: string,
+  input: { jiraSyncStatus: JiraSyncStatus; jiraSyncError?: string | null },
+) => {
+  const updated = await prisma.actionItem.update({
+    where: { id: actionId },
+    data: {
+      jiraSyncStatus: input.jiraSyncStatus,
+      jiraSyncError: input.jiraSyncError ?? null,
+    },
+  });
+  return mapAction(updated);
+};
+
+export const updateActionFromJira = async (
+  actionId: string,
+  patch: { description?: string; dueDate?: string | null; priority?: ActionPriority; status?: ActionStatus },
+) => {
+  const updated = await prisma.actionItem.update({
+    where: { id: actionId },
+    data: {
+      ...(patch.description ? { description: patch.description } : {}),
+      ...(patch.dueDate !== undefined ? { dueDate: patch.dueDate } : {}),
+      ...(patch.priority ? { priority: patch.priority } : {}),
+      ...(patch.status ? { status: patch.status } : {}),
+    },
+  });
+  return mapAction(updated);
 };

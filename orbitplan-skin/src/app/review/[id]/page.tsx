@@ -6,6 +6,7 @@ import { AnimatePresence, motion } from "framer-motion";
 import { jsPDF } from "jspdf";
 import { useParams } from "next/navigation";
 import { RequireAuth } from "@/components/auth/require-auth";
+import { MultiStepLoader } from "@/components/aceternity/multi-step-loader";
 import { Tabs } from "@/components/aceternity/tabs";
 import { AppShell } from "@/components/layout/app-shell";
 import { Button } from "@/components/ui/button";
@@ -17,20 +18,34 @@ import {
   clearMeetingChatHistory,
   confirmMeetingActions,
   deleteMeetingAction,
+  disconnectJira,
   exportMeetingToJira,
   getMeeting,
   getMeetingChatHistory,
   getJiraAuthUrl,
+  getJiraCreateMeta,
+  getJiraLookup,
   getJiraProjects,
+  scanMeetingToJira,
   getJiraSites,
   getJiraStatus,
   getProcessingErrorMessage,
   processMeeting,
+  resyncMeetingAction,
   updateMeetingAction,
 } from "@/lib/api";
 import type { ActionPriority, ActionStatus } from "@/types/action";
 import type { ChatMessage } from "@/types/chat";
-import type { JiraExportResult, JiraIntegrationStatus, JiraProject, JiraSite } from "@/types/jira";
+import type {
+  JiraCreateFieldMeta,
+  JiraIssueTypeCreateMeta,
+  JiraLookupItem,
+  JiraExportResult,
+  JiraIntegrationStatus,
+  JiraProject,
+  JiraScanResult,
+  JiraSite,
+} from "@/types/jira";
 import type { MeetingDetail } from "@/types/meetingDetail";
 
 const statusTone = (status: string): "neutral" | "success" | "warning" => {
@@ -43,6 +58,8 @@ type WorkspaceTab = "summary" | "chat";
 type DownloadFormat = "txt" | "csv" | "pdf" | "docx";
 type TicketFormatPreset = "enterprise" | "engineering" | "operations" | "compliance";
 type SettingsPanelTab = "export-target" | "project" | "formats" | "fields" | "automation";
+type ActionViewFilter = "all" | ActionStatus;
+type JiraExportStage = "idle" | "scanning" | "blocked" | "exporting" | "complete";
 type JiraTicketDetailsDraft = {
   issueType: string;
   labelsText: string;
@@ -51,6 +68,7 @@ type JiraTicketDetailsDraft = {
   additionalContext: string;
   advancedFieldsJson: string;
 };
+type JiraDynamicFieldValues = Record<string, string | string[]>;
 const CHAT_PAGE_SIZE = 20;
 
 const TICKET_FORMAT_PRESETS: Array<{
@@ -84,6 +102,20 @@ const TICKET_FORMAT_PRESETS: Array<{
     sections: ["Control objective", "Risk", "Evidence", "Approval trail"],
   },
 ];
+const JIRA_EXPORT_LOADING_STATES = [
+  {
+    title: "Scanning",
+    description: "Checking ticket quality and Jira project requirements.",
+  },
+  {
+    title: "Validating",
+    description: "Gating blocked tickets before Jira creation.",
+  },
+  {
+    title: "Exporting",
+    description: "Creating Jira issues and linking them back.",
+  },
+] as const;
 
 const DEFAULT_JIRA_TICKET_DETAILS: JiraTicketDetailsDraft = {
   issueType: "Task",
@@ -116,6 +148,28 @@ const priorityBadgeClass: Record<ActionPriority, string> = {
   low: "border-[rgba(108,242,255,0.35)] bg-[rgba(108,242,255,0.13)] text-[var(--accent)]",
   medium: "border-[rgba(255,213,106,0.4)] bg-[rgba(255,213,106,0.16)] text-[var(--warning)]",
   high: "border-[rgba(255,107,122,0.45)] bg-[rgba(255,107,122,0.15)] text-[var(--danger)]",
+};
+
+const jiraSyncBadgeClass = {
+  not_linked: "border-[rgba(120,145,255,0.24)] bg-[rgba(255,255,255,0.05)] text-[var(--text-muted)]",
+  synced: "border-[rgba(56,255,179,0.4)] bg-[rgba(56,255,179,0.14)] text-[var(--success)]",
+  sync_failed: "border-[rgba(255,107,122,0.45)] bg-[rgba(255,107,122,0.14)] text-[var(--danger)]",
+} as const;
+
+const jiraSyncLabel = {
+  not_linked: "Not Linked",
+  synced: "Synced",
+  sync_failed: "Sync Failed",
+} as const;
+
+const formatActionStatusLabel = (status: ActionStatus) => ACTION_STATUS_OPTIONS.find((option) => option.value === status)?.label ?? status;
+const formatActionPriorityLabel = (priority: ActionPriority) =>
+  ACTION_PRIORITY_OPTIONS.find((option) => option.value === priority)?.label ?? priority;
+const actionFilterLabel: Record<ActionViewFilter, string> = {
+  all: "All",
+  open: "Open",
+  in_progress: "In Progress",
+  done: "Done",
 };
 
 type PlatformSyncState = "connected" | "available" | "not_connected";
@@ -238,6 +292,7 @@ export default function ReviewPage() {
   const [chatClearing, setChatClearing] = useState(false);
   const [confirmClearOpen, setConfirmClearOpen] = useState(false);
   const [updatingActionId, setUpdatingActionId] = useState<string | null>(null);
+  const [resyncingActionId, setResyncingActionId] = useState<string | null>(null);
   const [confirmingActions, setConfirmingActions] = useState<"accept" | "fallback" | null>(null);
   const [deletingActionId, setDeletingActionId] = useState<string | null>(null);
   const [jiraStatus, setJiraStatus] = useState<JiraIntegrationStatus | null>(null);
@@ -246,17 +301,36 @@ export default function ReviewPage() {
   const [jiraCloudId, setJiraCloudId] = useState("");
   const [jiraProjectKey, setJiraProjectKey] = useState("");
   const [jiraLoading, setJiraLoading] = useState(false);
+  const [jiraDisconnecting, setJiraDisconnecting] = useState(false);
   const [jiraExporting, setJiraExporting] = useState(false);
   const [jiraResult, setJiraResult] = useState<JiraExportResult | null>(null);
+  const [jiraScanResult, setJiraScanResult] = useState<JiraScanResult | null>(null);
+  const [jiraExportStage, setJiraExportStage] = useState<JiraExportStage>("idle");
+  const [jiraExportModalOpen, setJiraExportModalOpen] = useState(false);
   const [jiraConnectedNotice, setJiraConnectedNotice] = useState(false);
+  const [deliveryOptionSelected, setDeliveryOptionSelected] = useState(false);
   const [activeSidebarTool, setActiveSidebarTool] = useState<ReviewSidebarTool | null>(null);
   const [activeTab, setActiveTab] = useState<WorkspaceTab>("summary");
   const [downloadFormat, setDownloadFormat] = useState<DownloadFormat>("txt");
   const [ticketFormatPreset, setTicketFormatPreset] = useState<TicketFormatPreset>("enterprise");
   const [settingsPanelTab, setSettingsPanelTab] = useState<SettingsPanelTab>("formats");
+  const [actionViewFilter, setActionViewFilter] = useState<ActionViewFilter>("all");
+  const [expandedActionId, setExpandedActionId] = useState<string | null>(null);
   const [jiraTicketDetails, setJiraTicketDetails] = useState<JiraTicketDetailsDraft>(DEFAULT_JIRA_TICKET_DETAILS);
+  const [jiraIssueTypes, setJiraIssueTypes] = useState<JiraIssueTypeCreateMeta[]>([]);
+  const [jiraCreateMetaLoading, setJiraCreateMetaLoading] = useState(false);
+  const [jiraDynamicFieldValues, setJiraDynamicFieldValues] = useState<JiraDynamicFieldValues>({});
+  const [jiraLookupQueries, setJiraLookupQueries] = useState<Record<string, string>>({});
+  const [jiraLookupResults, setJiraLookupResults] = useState<Record<string, JiraLookupItem[]>>({});
+  const [jiraLookupLoading, setJiraLookupLoading] = useState<Record<string, boolean>>({});
   const chatViewportRef = useRef<HTMLDivElement | null>(null);
   const hasSeededChatRef = useRef(false);
+  const previousChatMessageIdsRef = useRef<string[]>([]);
+  const chatAudioContextRef = useRef<AudioContext | null>(null);
+  const suppressNextChatSoundRef = useRef(false);
+  const jiraLookupTimeoutsRef = useRef<Record<string, ReturnType<typeof setTimeout> | undefined>>({});
+  const jiraConnectWindowRef = useRef<Window | null>(null);
+  const jiraConnectPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const selectedTicketFormat =
     TICKET_FORMAT_PRESETS.find((preset) => preset.id === ticketFormatPreset) ?? TICKET_FORMAT_PRESETS[0];
   const jiraLabels = jiraTicketDetails.labelsText
@@ -267,6 +341,25 @@ export default function ReviewPage() {
     .split(",")
     .map((component) => component.trim())
     .filter(Boolean);
+  const selectedJiraIssueType =
+    jiraIssueTypes.find((issueType) => issueType.name === jiraTicketDetails.issueType || issueType.id === jiraTicketDetails.issueType) ?? null;
+  const selectedJiraSite = jiraSites.find((site) => site.id === jiraCloudId) ?? null;
+  const linkedActionCount = data?.actions.filter((action) => action.jiraIssueKey && action.jiraCloudId).length ?? 0;
+  const allActionsAlreadyLinked = Boolean(data && data.actions.length > 0 && linkedActionCount === data.actions.length);
+  const showDeliveryStep =
+    deliveryOptionSelected || linkedActionCount > 0 || jiraExportStage !== "idle" || Boolean(jiraResult?.issues.length);
+  const jiraLoaderStep =
+    jiraExportStage === "exporting" || jiraExportStage === "complete"
+      ? 2
+      : jiraExportStage === "blocked"
+        ? 1
+        : jiraExportStage === "scanning"
+          ? 0
+          : 0;
+  const jiraDynamicFields = (selectedJiraIssueType?.fields ?? []).filter(
+    (field) =>
+      !["summary", "description", "issuetype", "project", "priority", "labels", "components", "environment", "duedate"].includes(field.key),
+  );
   const platformSyncItems = [
     {
       name: "Jira",
@@ -296,6 +389,15 @@ export default function ReviewPage() {
 
   const renderExecutionPanel = () => {
     if (!data) return null;
+
+    const actionCounts = {
+      all: data.actions.length,
+      open: data.actions.filter((item) => item.status === "open").length,
+      in_progress: data.actions.filter((item) => item.status === "in_progress").length,
+      done: data.actions.filter((item) => item.status === "done").length,
+    } satisfies Record<ActionViewFilter, number>;
+    const filteredActions =
+      actionViewFilter === "all" ? data.actions : data.actions.filter((action) => action.status === actionViewFilter);
 
     return (
       <div className="space-y-6">
@@ -335,114 +437,191 @@ export default function ReviewPage() {
             )}
             {data.actions.length === 0 && <p className="text-sm text-[var(--text-muted)]">No actions generated yet.</p>}
             {data.actions.length > 0 && (
-              <div className="grid grid-cols-3 gap-2">
-                <div className="rounded-xl border border-[rgba(255,213,106,0.34)] bg-[rgba(255,213,106,0.1)] px-3 py-2">
-                  <p className="text-[10px] font-semibold uppercase tracking-[0.08em] text-[var(--warning)]">Open</p>
-                  <p className="text-lg font-bold text-[var(--text-primary)]">
-                    {data.actions.filter((item) => item.status === "open").length}
-                  </p>
+              <div className="space-y-3">
+                <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+                  {(["all", "open", "in_progress", "done"] as ActionViewFilter[]).map((filter) => {
+                    const isActive = actionViewFilter === filter;
+                    return (
+                      <button
+                        key={filter}
+                        type="button"
+                        onClick={() => setActionViewFilter(filter)}
+                        className={`rounded-xl border px-3 py-3 text-left transition ${
+                          isActive
+                            ? "border-[rgba(120,145,255,0.38)] bg-[rgba(120,145,255,0.14)] shadow-[0_18px_32px_-28px_rgba(120,145,255,0.9)]"
+                            : "border-[rgba(120,145,255,0.16)] bg-[rgba(255,255,255,0.03)] hover:border-[rgba(120,145,255,0.3)]"
+                        }`}
+                      >
+                        <p className="text-[10px] font-semibold uppercase tracking-[0.08em] text-[var(--text-muted)]">
+                          {filter === "all" ? "General" : actionFilterLabel[filter]}
+                        </p>
+                        <p className="mt-2 text-lg font-bold text-[var(--text-primary)]">{actionCounts[filter]}</p>
+                      </button>
+                    );
+                  })}
                 </div>
-                <div className="rounded-xl border border-[rgba(108,242,255,0.34)] bg-[rgba(108,242,255,0.1)] px-3 py-2">
-                  <p className="text-[10px] font-semibold uppercase tracking-[0.08em] text-[var(--accent)]">In Progress</p>
-                  <p className="text-lg font-bold text-[var(--text-primary)]">
-                    {data.actions.filter((item) => item.status === "in_progress").length}
+
+                <div className="flex items-center justify-between gap-3 rounded-xl border border-[rgba(120,145,255,0.14)] bg-[rgba(255,255,255,0.03)] px-3 py-2">
+                  <p className="text-sm text-[var(--text-secondary)]">
+                    Showing <span className="font-semibold text-[var(--text-primary)]">{actionCounts[actionViewFilter]}</span>{" "}
+                    {actionViewFilter === "all" ? "tickets" : `${actionFilterLabel[actionViewFilter].toLowerCase()} tickets`}
                   </p>
-                </div>
-                <div className="rounded-xl border border-[rgba(56,255,179,0.34)] bg-[rgba(56,255,179,0.1)] px-3 py-2">
-                  <p className="text-[10px] font-semibold uppercase tracking-[0.08em] text-[var(--success)]">Done</p>
-                  <p className="text-lg font-bold text-[var(--text-primary)]">
-                    {data.actions.filter((item) => item.status === "done").length}
-                  </p>
+                  <button
+                    type="button"
+                    onClick={() => setExpandedActionId(null)}
+                    className="text-xs font-medium text-[var(--text-secondary)] transition hover:text-[var(--text-primary)]"
+                  >
+                    Collapse all
+                  </button>
                 </div>
               </div>
             )}
-            {data.actions.map((action, index) => (
+            {filteredActions.map((action, index) => {
+              const isExpanded = expandedActionId === action.id;
+
+              return (
               <motion.article
                 key={action.id}
                 initial={{ opacity: 0, y: 10 }}
                 animate={{ opacity: 1, y: 0 }}
                 transition={{ duration: 0.22, delay: index * 0.04 }}
-                className="group relative overflow-hidden rounded-2xl border border-[rgba(120,145,255,0.32)] bg-[linear-gradient(135deg,rgba(30,123,255,0.18)_0%,rgba(143,56,255,0.14)_55%,rgba(255,180,0,0.08)_100%)] p-3"
+                className="group relative overflow-hidden rounded-2xl border border-[rgba(120,145,255,0.24)] bg-[rgba(255,255,255,0.03)] p-3"
               >
                 <div className="pointer-events-none absolute inset-y-0 left-0 w-1.5 bg-gradient-to-b from-[var(--accent)] via-[var(--accent-strong)] to-[var(--accent-warm)]" />
-                <div className="pointer-events-none absolute -right-8 -top-8 h-20 w-20 rounded-full bg-[rgba(30,123,255,0.2)] blur-2xl transition group-hover:bg-[rgba(143,56,255,0.24)]" />
+                <div className="pointer-events-none absolute -right-8 -top-8 h-20 w-20 rounded-full bg-[rgba(30,123,255,0.14)] blur-2xl transition group-hover:bg-[rgba(143,56,255,0.18)]" />
 
                 <div className="ml-3">
-                  <div className="mb-2 flex items-center justify-between gap-2">
-                    <span className="rounded-full border border-[rgba(120,145,255,0.45)] bg-[rgba(7,12,30,0.8)] px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.08em] text-[var(--text-secondary)]">
-                      Task {index + 1}
-                    </span>
-                    <span className="rounded-full bg-[rgba(255,255,255,0.08)] px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.08em] text-[var(--text-primary)]">
-                      {Math.round(action.confidence * 100)}% confidence
-                    </span>
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0 flex-1">
+                      <div className="mb-2 flex items-center gap-2">
+                        <span className="rounded-full border border-[rgba(120,145,255,0.28)] bg-[rgba(7,12,30,0.72)] px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.08em] text-[var(--text-secondary)]">
+                          Task {index + 1}
+                        </span>
+                        <span
+                          className={`rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.08em] ${statusBadgeClass[action.status]}`}
+                        >
+                          {formatActionStatusLabel(action.status)}
+                        </span>
+                        <span
+                          className={`rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.08em] ${priorityBadgeClass[action.priority]}`}
+                        >
+                          {formatActionPriorityLabel(action.priority)}
+                        </span>
+                      </div>
+                      <p className="truncate pr-4 text-sm font-semibold leading-relaxed text-[var(--text-primary)]">{action.description}</p>
+                      <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-[var(--text-secondary)]">
+                        <span>
+                          Owner: <span className="font-semibold text-[var(--text-primary)]">{action.ownerEmail}</span>
+                        </span>
+                        {action.jiraIssueKey && action.jiraIssueUrl && (
+                          <a
+                            href={action.jiraIssueUrl}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="rounded-full border border-[rgba(108,242,255,0.28)] bg-[rgba(108,242,255,0.1)] px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.08em] text-[var(--accent)] transition hover:text-[var(--text-primary)]"
+                          >
+                            Jira {action.jiraIssueKey}
+                          </a>
+                        )}
+                        <span
+                          className={`rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.08em] ${jiraSyncBadgeClass[action.jiraSyncStatus]}`}
+                          title={action.jiraSyncError || jiraSyncLabel[action.jiraSyncStatus]}
+                        >
+                          {jiraSyncLabel[action.jiraSyncStatus]}
+                        </span>
+                      </div>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={() => setExpandedActionId((current) => (current === action.id ? null : action.id))}
+                      className="rounded-full border border-[var(--border)] bg-[rgba(255,255,255,0.04)] px-3 py-1.5 text-xs font-semibold text-[var(--text-secondary)] transition hover:text-[var(--text-primary)]"
+                    >
+                      {isExpanded ? "Hide" : "View"}
+                    </button>
                   </div>
 
-                  <p className="text-sm font-semibold leading-relaxed text-[var(--text-primary)]">{action.description}</p>
-                  <div className="mt-2 flex flex-wrap items-center gap-2">
-                    <p className="text-xs text-[var(--text-secondary)]">
-                      Owner: <span className="font-semibold text-[var(--text-primary)]">{action.ownerEmail}</span>
-                    </p>
-                    <span
-                      className={`rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.08em] ${statusBadgeClass[action.status]}`}
-                    >
-                      {action.status.replace("_", " ")}
-                    </span>
-                    <span
-                      className={`rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.08em] ${priorityBadgeClass[action.priority]}`}
-                    >
-                      Priority {action.priority}
-                    </span>
-                  </div>
-                  <div className="mt-3 flex flex-wrap items-center gap-2">
-                    {ACTION_STATUS_OPTIONS.map((option) => (
-                      <button
-                        key={`${action.id}-${option.value}`}
-                        type="button"
-                        onClick={() => void handleUpdateAction(action.id, { status: option.value })}
-                        disabled={updatingActionId === action.id || action.status === option.value}
-                        className={`rounded-full border px-2.5 py-1 text-[11px] font-semibold uppercase tracking-[0.06em] transition ${
-                          action.status === option.value
-                            ? "border-[rgba(108,242,255,0.6)] bg-[rgba(108,242,255,0.18)] text-[var(--text-primary)]"
-                            : "border-[var(--border)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
-                        } disabled:cursor-not-allowed disabled:opacity-60`}
+                  <AnimatePresence initial={false}>
+                    {isExpanded && (
+                      <motion.div
+                        initial={{ opacity: 0, y: 8 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        exit={{ opacity: 0, y: -6 }}
+                        transition={{ duration: 0.18, ease: "easeOut" }}
+                        className="mt-3 rounded-2xl border border-[rgba(120,145,255,0.18)] bg-[rgba(7,12,30,0.5)] p-3"
                       >
-                        {option.label}
-                      </button>
-                    ))}
-                    <select
-                      value={action.priority}
-                      onChange={(event) =>
-                        void handleUpdateAction(action.id, { priority: event.target.value as ActionPriority })
-                      }
-                      disabled={updatingActionId === action.id}
-                      className="rounded-full border border-[var(--border)] bg-[rgba(7,12,30,0.8)] px-2.5 py-1 text-[11px] font-semibold uppercase tracking-[0.06em] text-[var(--text-primary)] outline-none focus:border-[var(--accent)] disabled:cursor-not-allowed disabled:opacity-60"
-                    >
-                      {ACTION_PRIORITY_OPTIONS.map((option) => (
-                        <option key={`${action.id}-priority-${option.value}`} value={option.value}>
-                          Priority: {option.label}
-                        </option>
-                      ))}
-                    </select>
-                    <Button
-                      variant="secondary"
-                      className="px-2.5 py-1 text-[11px] uppercase tracking-[0.06em]"
-                      onClick={() => void handleUpdateAction(action.id, { status: "done" })}
-                      disabled={updatingActionId === action.id || action.status === "done"}
-                    >
-                      Mark Done
-                    </Button>
-                    <Button
-                      variant="ghost"
-                      className="px-2.5 py-1 text-[11px] uppercase tracking-[0.06em] text-[var(--danger)] hover:text-[var(--danger)]"
-                      onClick={() => void handleDeleteAction(action.id)}
-                      disabled={deletingActionId === action.id}
-                    >
-                      {deletingActionId === action.id ? "Deleting..." : "Delete"}
-                    </Button>
-                  </div>
+                        <div className="mb-2 flex items-center justify-between gap-2">
+                          <span className="rounded-full bg-[rgba(255,255,255,0.08)] px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.08em] text-[var(--text-primary)]">
+                            {Math.round(action.confidence * 100)}% confidence
+                          </span>
+                          <span className="text-xs text-[var(--text-secondary)]">
+                            Due: <span className="font-semibold text-[var(--text-primary)]">{action.dueDate ? new Date(action.dueDate).toLocaleDateString() : "Not set"}</span>
+                          </span>
+                        </div>
+                        <div className="flex flex-wrap items-center gap-2">
+                          {ACTION_STATUS_OPTIONS.map((option) => (
+                            <button
+                              key={`${action.id}-${option.value}`}
+                              type="button"
+                              onClick={() => void handleUpdateAction(action.id, { status: option.value })}
+                              disabled={updatingActionId === action.id || action.status === option.value}
+                              className={`rounded-full border px-2.5 py-1 text-[11px] font-semibold uppercase tracking-[0.06em] transition ${
+                                action.status === option.value
+                                  ? "border-[rgba(108,242,255,0.6)] bg-[rgba(108,242,255,0.18)] text-[var(--text-primary)]"
+                                  : "border-[var(--border)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
+                              } disabled:cursor-not-allowed disabled:opacity-60`}
+                            >
+                              {option.label}
+                            </button>
+                          ))}
+                          <select
+                            value={action.priority}
+                            onChange={(event) =>
+                              void handleUpdateAction(action.id, { priority: event.target.value as ActionPriority })
+                            }
+                            disabled={updatingActionId === action.id}
+                            className="rounded-full border border-[var(--border)] bg-[rgba(7,12,30,0.8)] px-2.5 py-1 text-[11px] font-semibold uppercase tracking-[0.06em] text-[var(--text-primary)] outline-none focus:border-[var(--accent)] disabled:cursor-not-allowed disabled:opacity-60"
+                          >
+                            {ACTION_PRIORITY_OPTIONS.map((option) => (
+                              <option key={`${action.id}-priority-${option.value}`} value={option.value}>
+                                Priority: {option.label}
+                              </option>
+                            ))}
+                          </select>
+                          <Button
+                            variant="secondary"
+                            className="px-2.5 py-1 text-[11px] uppercase tracking-[0.06em]"
+                            onClick={() => void handleUpdateAction(action.id, { status: "done" })}
+                            disabled={updatingActionId === action.id || action.status === "done"}
+                          >
+                            Mark Done
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            className="px-2.5 py-1 text-[11px] uppercase tracking-[0.06em] text-[var(--danger)] hover:text-[var(--danger)]"
+                            onClick={() => void handleDeleteAction(action.id)}
+                            disabled={deletingActionId === action.id}
+                          >
+                            {deletingActionId === action.id ? "Deleting..." : "Delete"}
+                          </Button>
+                          {action.jiraIssueKey && (
+                            <Button
+                              variant="ghost"
+                              className="px-2.5 py-1 text-[11px] uppercase tracking-[0.06em]"
+                              onClick={() => void handleResyncAction(action.id)}
+                              disabled={resyncingActionId === action.id}
+                            >
+                              {resyncingActionId === action.id ? "Resyncing..." : "Resync Jira"}
+                            </Button>
+                          )}
+                        </div>
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
                 </div>
               </motion.article>
-            ))}
+              );
+            })}
           </div>
         </Card>
 
@@ -464,6 +643,624 @@ export default function ReviewPage() {
     );
   };
 
+  const playChatMessageTone = async (role: ChatMessage["role"], delayMs = 0) => {
+    if (typeof window === "undefined") return;
+
+    const AudioContextClass = window.AudioContext;
+    if (!AudioContextClass) return;
+
+    const startTone = () => {
+      const context = chatAudioContextRef.current ?? new AudioContextClass();
+      chatAudioContextRef.current = context;
+      if (context.state === "suspended") {
+        void context.resume();
+      }
+
+      const oscillator = context.createOscillator();
+      const gainNode = context.createGain();
+      oscillator.type = role === "assistant" ? "sine" : "triangle";
+      oscillator.frequency.value = role === "assistant" ? 720 : 540;
+      gainNode.gain.setValueAtTime(0.0001, context.currentTime);
+      gainNode.gain.exponentialRampToValueAtTime(0.045, context.currentTime + 0.01);
+      gainNode.gain.exponentialRampToValueAtTime(0.0001, context.currentTime + 0.18);
+      oscillator.connect(gainNode);
+      gainNode.connect(context.destination);
+      oscillator.start();
+      oscillator.stop(context.currentTime + 0.2);
+    };
+
+    if (delayMs > 0) {
+      window.setTimeout(startTone, delayMs);
+      return;
+    }
+
+    startTone();
+  };
+
+  const playJiraExportCompleteTone = async () => {
+    if (typeof window === "undefined") return;
+
+    const AudioContextClass = window.AudioContext;
+    if (!AudioContextClass) return;
+
+    const context = chatAudioContextRef.current ?? new AudioContextClass();
+    chatAudioContextRef.current = context;
+    if (context.state === "suspended") {
+      await context.resume();
+    }
+
+    const notes = [640, 820, 980];
+    notes.forEach((frequency, index) => {
+      const oscillator = context.createOscillator();
+      const gainNode = context.createGain();
+      const startAt = context.currentTime + index * 0.11;
+      oscillator.type = "sine";
+      oscillator.frequency.value = frequency;
+      gainNode.gain.setValueAtTime(0.0001, startAt);
+      gainNode.gain.exponentialRampToValueAtTime(0.055, startAt + 0.02);
+      gainNode.gain.exponentialRampToValueAtTime(0.0001, startAt + 0.18);
+      oscillator.connect(gainNode);
+      gainNode.connect(context.destination);
+      oscillator.start(startAt);
+      oscillator.stop(startAt + 0.2);
+    });
+  };
+
+  const renderJiraExportContent = () => (
+    <div className="space-y-4">
+      {!jiraStatus?.configured && (
+        <p className="text-sm text-[var(--text-secondary)]">
+          Set `JIRA_CLIENT_ID`, `JIRA_CLIENT_SECRET`, and `JIRA_REDIRECT_URI` in the API env first.
+        </p>
+      )}
+
+      {jiraStatus?.configured && !jiraStatus.connected && (
+        <div className="space-y-3">
+          <p className="text-sm text-[var(--text-secondary)]">
+            Connect Jira first, then choose the destination project and export the confirmed actions from here.
+          </p>
+          <Button variant="secondary" onClick={handleConnectJira}>
+            Connect Jira
+          </Button>
+        </div>
+      )}
+
+      {jiraStatus?.configured && jiraStatus.connected && (
+        <div className="space-y-4">
+          {jiraConnectedNotice && (
+            <div className="rounded-xl border border-[rgba(56,255,179,0.35)] bg-[rgba(56,255,179,0.1)] p-3">
+              <p className="text-sm font-semibold text-[var(--text-primary)]">Jira connected successfully</p>
+            </div>
+          )}
+          {jiraExportStage === "complete" && (
+            <div className="rounded-2xl border border-[rgba(56,255,179,0.34)] bg-[linear-gradient(135deg,rgba(56,255,179,0.14)_0%,rgba(30,123,255,0.1)_100%)] p-4">
+              <div className="flex items-center gap-3">
+                <div className="flex h-10 w-10 items-center justify-center rounded-2xl border border-[rgba(56,255,179,0.34)] bg-[rgba(56,255,179,0.16)] text-[var(--success)]">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="h-5 w-5">
+                    <path d="m5 12 4 4L19 6" />
+                  </svg>
+                </div>
+                <div>
+                  <p className="text-sm font-semibold text-[var(--text-primary)]">Jira export completed</p>
+                  <p className="mt-1 text-xs text-[var(--text-secondary)]">
+                    Tickets were created successfully and linked back to this meeting.
+                  </p>
+                </div>
+              </div>
+            </div>
+          )}
+
+          <div className="space-y-3">
+            <MultiStepLoader
+              loadingStates={JIRA_EXPORT_LOADING_STATES.map((item) => ({ ...item }))}
+              currentStep={jiraLoaderStep}
+              loading={jiraExportStage === "scanning" || jiraExportStage === "exporting"}
+              blocked={jiraExportStage === "blocked"}
+              blockedLabel="Export Gated"
+            />
+            <p className="text-sm text-[var(--text-secondary)]">
+              {jiraExportStage === "scanning" && "Scanning ticket quality and checking export blockers..."}
+              {jiraExportStage === "exporting" && "Scan passed. Sending approved tickets to Jira..."}
+              {jiraExportStage === "complete" && "Export completed successfully."}
+              {jiraExportStage === "blocked" && "Scan found blockers. Review the report below before exporting."}
+              {jiraExportStage === "idle" && "Submit to Jira will run a scan first, then export only if the scan passes."}
+            </p>
+          </div>
+
+          <div className="grid gap-3 xl:grid-cols-2">
+            <select
+              value={jiraCloudId}
+              onChange={(event) => setJiraCloudId(event.target.value)}
+              className="rounded-xl border border-[var(--border)] bg-[var(--surface-strong)] px-3 py-2 text-sm text-[var(--text-primary)] outline-none focus:border-[var(--accent)]"
+              disabled={jiraLoading || jiraExporting}
+            >
+              {jiraSites.map((site) => (
+                <option key={site.id} value={site.id}>
+                  {site.name}
+                </option>
+              ))}
+            </select>
+
+            <select
+              value={jiraProjectKey}
+              onChange={(event) => setJiraProjectKey(event.target.value)}
+              className="rounded-xl border border-[var(--border)] bg-[var(--surface-strong)] px-3 py-2 text-sm text-[var(--text-primary)] outline-none focus:border-[var(--accent)]"
+              disabled={jiraLoading || jiraExporting || jiraProjects.length === 0}
+            >
+              {jiraProjects.map((project) => (
+                <option key={project.id} value={project.key}>
+                  {project.key} - {project.name}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div className="space-y-4 rounded-2xl border border-[rgba(120,145,255,0.18)] bg-[rgba(7,12,30,0.36)] p-4">
+            <div>
+              <p className="text-sm font-semibold text-[var(--text-primary)]">Ticket fields</p>
+              <p className="mt-1 text-xs text-[var(--text-secondary)]">
+                Configure the Jira payload here before scanning and export.
+              </p>
+            </div>
+
+            <div className="grid gap-4 xl:grid-cols-2 2xl:grid-cols-4">
+              <label className="space-y-2">
+                <span className="text-sm font-medium text-[var(--text-secondary)]">Issue Type</span>
+                {jiraIssueTypes.length > 0 ? (
+                  <select
+                    value={selectedJiraIssueType?.name ?? jiraTicketDetails.issueType}
+                    onChange={(event) => setJiraTicketDetails((current) => ({ ...current, issueType: event.target.value }))}
+                    className="w-full rounded-xl border border-[var(--border)] bg-[var(--surface-strong)] px-3 py-2 text-sm text-[var(--text-primary)] outline-none focus:border-[var(--accent)]"
+                  >
+                    {jiraIssueTypes.map((issueType) => (
+                      <option key={issueType.id} value={issueType.name}>
+                        {issueType.name}
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <input
+                    value={jiraTicketDetails.issueType}
+                    onChange={(event) => setJiraTicketDetails((current) => ({ ...current, issueType: event.target.value }))}
+                    placeholder="Task"
+                    className="w-full rounded-xl border border-[var(--border)] bg-[var(--surface-strong)] px-3 py-2 text-sm text-[var(--text-primary)] outline-none focus:border-[var(--accent)]"
+                  />
+                )}
+              </label>
+
+              <label className="space-y-2">
+                <span className="text-sm font-medium text-[var(--text-secondary)]">Labels</span>
+                <input
+                  value={jiraTicketDetails.labelsText}
+                  onChange={(event) => setJiraTicketDetails((current) => ({ ...current, labelsText: event.target.value }))}
+                  placeholder="orbitplan, customer-facing"
+                  className="w-full rounded-xl border border-[var(--border)] bg-[var(--surface-strong)] px-3 py-2 text-sm text-[var(--text-primary)] outline-none focus:border-[var(--accent)]"
+                />
+              </label>
+
+              <label className="space-y-2">
+                <span className="text-sm font-medium text-[var(--text-secondary)]">Components</span>
+                <input
+                  value={jiraTicketDetails.componentsText}
+                  onChange={(event) => setJiraTicketDetails((current) => ({ ...current, componentsText: event.target.value }))}
+                  placeholder="Platform API, Admin UI"
+                  className="w-full rounded-xl border border-[var(--border)] bg-[var(--surface-strong)] px-3 py-2 text-sm text-[var(--text-primary)] outline-none focus:border-[var(--accent)]"
+                />
+              </label>
+
+              <label className="space-y-2">
+                <span className="text-sm font-medium text-[var(--text-secondary)]">Environment</span>
+                <input
+                  value={jiraTicketDetails.environment}
+                  onChange={(event) => setJiraTicketDetails((current) => ({ ...current, environment: event.target.value }))}
+                  placeholder="Production, staging, internal admin"
+                  className="w-full rounded-xl border border-[var(--border)] bg-[var(--surface-strong)] px-3 py-2 text-sm text-[var(--text-primary)] outline-none focus:border-[var(--accent)]"
+                />
+              </label>
+            </div>
+
+            <label className="block space-y-2">
+              <span className="text-sm font-medium text-[var(--text-secondary)]">Additional Context</span>
+              <textarea
+                value={jiraTicketDetails.additionalContext}
+                onChange={(event) => setJiraTicketDetails((current) => ({ ...current, additionalContext: event.target.value }))}
+                rows={4}
+                placeholder="Escalation notes, rollout constraints, customer impact, internal references..."
+                className="w-full rounded-xl border border-[var(--border)] bg-[var(--surface-strong)] px-3 py-2 text-sm text-[var(--text-primary)] outline-none focus:border-[var(--accent)]"
+              />
+            </label>
+
+            <div className="space-y-4 rounded-[24px] border border-[rgba(120,145,255,0.2)] bg-[rgba(255,255,255,0.03)] p-5">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <p className="text-lg font-semibold text-[var(--text-primary)]">Detected Jira Fields</p>
+                  <p className="mt-1 text-sm text-[var(--text-secondary)]">
+                    {jiraCreateMetaLoading
+                      ? "Loading fields from Jira..."
+                      : selectedJiraIssueType
+                        ? `Fields available for ${selectedJiraIssueType.name} in ${jiraProjectKey}.`
+                        : "Select a Jira project to load create fields."}
+                  </p>
+                </div>
+                {selectedJiraIssueType && (
+                  <span className="rounded-full border border-[rgba(120,145,255,0.2)] bg-[rgba(255,255,255,0.04)] px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.08em] text-[var(--text-primary)]">
+                    {jiraDynamicFields.length} fields
+                  </span>
+                )}
+              </div>
+
+              {selectedJiraIssueType && jiraDynamicFields.length > 0 ? (
+                <div className="grid gap-4 xl:grid-cols-2 2xl:grid-cols-3">
+                  {jiraDynamicFields.map((field) => renderDynamicJiraField(field))}
+                </div>
+              ) : (
+                <p className="text-sm text-[var(--text-secondary)]">
+                  {selectedJiraIssueType
+                    ? "No extra Jira create fields were detected beyond the core fields already handled here."
+                    : "Connect Jira and choose a project to load project-specific fields."}
+                </p>
+              )}
+            </div>
+
+            <label className="block space-y-2">
+              <span className="text-sm font-medium text-[var(--text-secondary)]">Advanced Jira Fields JSON</span>
+              <textarea
+                value={jiraTicketDetails.advancedFieldsJson}
+                onChange={(event) => setJiraTicketDetails((current) => ({ ...current, advancedFieldsJson: event.target.value }))}
+                rows={8}
+                placeholder={'{"customfield_10011":"ENG","customfield_10020":8}'}
+                className="w-full rounded-xl border border-[var(--border)] bg-[rgba(7,12,30,0.7)] px-3 py-2 font-mono text-sm text-[var(--text-primary)] outline-none focus:border-[var(--accent)]"
+              />
+              <p className="text-xs text-[var(--text-secondary)]">
+                Use this for custom Jira fields such as story points, team fields, epic links, request types, or any project-specific schema.
+              </p>
+            </label>
+          </div>
+
+          {!data?.meeting.actionsConfirmed && (
+            <p className="text-xs text-[var(--warning)]">Confirm the action plan before exporting.</p>
+          )}
+          {allActionsAlreadyLinked && (
+            <div className="rounded-xl border border-[rgba(56,255,179,0.24)] bg-[rgba(56,255,179,0.08)] p-3">
+              <p className="text-sm font-semibold text-[var(--text-primary)]">This meeting is already exported</p>
+              <p className="mt-1 text-xs text-[var(--text-secondary)]">
+                All current actions are already linked to Jira. Use the Jira links below or the per-action resync controls if you need updates.
+              </p>
+            </div>
+          )}
+
+          <div className="flex flex-wrap gap-2">
+            <Button
+              variant="secondary"
+              onClick={handleExportToJira}
+              disabled={
+                jiraExporting ||
+                !data?.meeting.actionsConfirmed ||
+                !jiraCloudId ||
+                !jiraProjectKey ||
+                !data ||
+                data.actions.length === 0 ||
+                allActionsAlreadyLinked
+              }
+            >
+              {allActionsAlreadyLinked ? "Already Exported" : jiraExporting ? "Exporting..." : "Export To Jira"}
+            </Button>
+            <Button variant="ghost" onClick={() => void loadJiraState()} disabled={jiraLoading || jiraExporting}>
+              {jiraLoading ? "Refreshing Jira..." : "Refresh Jira"}
+            </Button>
+          </div>
+
+          {jiraScanResult && (
+            <div className="rounded-xl border border-[rgba(120,145,255,0.18)] bg-[rgba(255,255,255,0.03)] p-3">
+              <div className="flex flex-wrap items-center gap-3">
+                <p className="text-sm font-semibold text-[var(--text-primary)]">Scan report</p>
+                <span className="rounded-full border border-[rgba(56,255,179,0.3)] bg-[rgba(56,255,179,0.12)] px-2.5 py-1 text-xs font-medium text-[var(--success)]">
+                  Ready {jiraScanResult.readyCount}
+                </span>
+                <span className="rounded-full border border-[rgba(255,107,122,0.3)] bg-[rgba(255,107,122,0.12)] px-2.5 py-1 text-xs font-medium text-[var(--danger)]">
+                  Blocked {jiraScanResult.blockedCount}
+                </span>
+              </div>
+
+              {jiraScanResult.blockedCount > 0 && (
+                <div className="mt-3 space-y-2">
+                  {jiraScanResult.items
+                    .filter((item) => item.status === "blocked")
+                    .map((item) => (
+                      <div key={item.actionId} className="rounded-xl border border-[rgba(255,107,122,0.2)] bg-[rgba(255,107,122,0.06)] p-3">
+                        <p className="text-sm font-semibold text-[var(--text-primary)]">{item.description}</p>
+                        <div className="mt-2 space-y-1 text-xs text-[var(--text-secondary)]">
+                          {item.reasons.map((reason) => (
+                            <p key={`${item.actionId}-${reason}`}>- {reason}</p>
+                          ))}
+                        </div>
+                      </div>
+                    ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          {jiraResult && (
+            <div className="rounded-xl border border-[var(--border)] bg-[var(--surface-strong)] p-3">
+              <p className="text-sm font-semibold text-[var(--text-primary)]">Created {jiraResult.createdCount} Jira issues</p>
+              <div className="mt-2 space-y-1 text-xs">
+                {jiraResult.issues.map((issue) => (
+                  <a
+                    key={issue.key}
+                    href={issue.url}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="block text-[var(--accent)] hover:underline"
+                  >
+                    {issue.key}
+                  </a>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+
+  const renderActionPlanFlowchart = () => {
+    if (!data) return null;
+
+    const jiraProjectUrl =
+      selectedJiraSite && jiraProjectKey ? `${selectedJiraSite.url.replace(/\/$/, "")}/projects/${jiraProjectKey}` : null;
+    const stepFourOptions = [
+      {
+        id: "engineering" as TicketFormatPreset,
+        title: "Engineering Tickets",
+        detail: "Use implementation-focused Jira tickets for product and engineering delivery.",
+        accentClass:
+          "border-[rgba(108,242,255,0.26)] bg-[linear-gradient(135deg,rgba(108,242,255,0.1)_0%,rgba(30,123,255,0.08)_100%)] hover:border-[rgba(108,242,255,0.42)]",
+      },
+      {
+        id: "enterprise" as TicketFormatPreset,
+        title: "General Work Intake",
+        detail: "Use balanced Jira tickets for cross-functional business or general project work.",
+        accentClass:
+          "border-[rgba(120,145,255,0.24)] bg-[linear-gradient(135deg,rgba(120,145,255,0.1)_0%,rgba(255,255,255,0.04)_100%)] hover:border-[rgba(120,145,255,0.38)]",
+      },
+      {
+        id: "operations" as TicketFormatPreset,
+        title: "Operations Handoff",
+        detail: "Use operational Jira tickets for support, rollout, or internal handoff workflows.",
+        accentClass:
+          "border-[rgba(255,213,106,0.26)] bg-[linear-gradient(135deg,rgba(255,213,106,0.1)_0%,rgba(30,123,255,0.08)_100%)] hover:border-[rgba(255,213,106,0.42)]",
+      },
+      {
+        id: "compliance" as TicketFormatPreset,
+        title: "Compliance Review",
+        detail: "Use controlled Jira tickets for regulated, audit, or approval-heavy workflows.",
+        accentClass:
+          "border-[rgba(255,107,122,0.26)] bg-[linear-gradient(135deg,rgba(255,107,122,0.1)_0%,rgba(143,56,255,0.08)_100%)] hover:border-[rgba(255,107,122,0.42)]",
+      },
+    ];
+
+    const workflowSteps = [
+      {
+        key: "captured",
+        label: "Meeting Captured",
+        detail: `${data.actions.length} action${data.actions.length === 1 ? "" : "s"} identified`,
+        isComplete: true,
+      },
+      {
+        key: "confirmed",
+        label: "Action Plan Confirmed",
+        detail: data.meeting.actionsConfirmed ? "Confirmed" : "Pending confirmation",
+        isComplete: data.meeting.actionsConfirmed,
+      },
+      {
+        key: "approved",
+        label: "Ready For Approval",
+        detail: data.meeting.status === "approved" ? "Approved" : data.meeting.status === "ready" ? "Awaiting approval" : "Still in review",
+        isComplete: data.meeting.status === "approved",
+      },
+    ];
+    if (showDeliveryStep) {
+      workflowSteps.push({
+        key: "delivery",
+        label: "Jira Delivery",
+        detail: jiraCloudId && jiraProjectKey ? "Export path configured" : "Project target not selected",
+        isComplete: Boolean(jiraCloudId && jiraProjectKey),
+      });
+    }
+
+    return (
+      <Card title="Action Plan Flow" subtitle="Visual map of the current delivery path">
+        <div className="space-y-6">
+          <div className={`grid gap-3 ${showDeliveryStep ? "xl:grid-cols-4" : "xl:grid-cols-3"}`}>
+            {workflowSteps.map((step, index) => (
+              <div
+                key={step.key}
+                className={`relative rounded-[24px] border p-4 ${
+                  step.key === "delivery" && jiraExportStage === "complete"
+                    ? "border-[rgba(56,255,179,0.3)] bg-[linear-gradient(135deg,rgba(56,255,179,0.12)_0%,rgba(30,123,255,0.12)_100%)] shadow-[0_20px_42px_-30px_rgba(56,255,179,0.7)]"
+                    : "border-[rgba(120,145,255,0.18)] bg-[rgba(255,255,255,0.03)]"
+                }`}
+              >
+                {index < workflowSteps.length - 1 && (
+                  <div className="pointer-events-none absolute right-[-18px] top-1/2 hidden h-px w-9 -translate-y-1/2 bg-[linear-gradient(90deg,rgba(120,145,255,0.45)_0%,rgba(120,145,255,0)_100%)] xl:block" />
+                )}
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <p className="text-xs font-semibold uppercase tracking-[0.14em] text-[var(--text-muted)]">Step {index + 1}</p>
+                    <p className="mt-2 text-base font-semibold text-[var(--text-primary)]">{step.label}</p>
+                  </div>
+                  <span
+                    className={`rounded-full border px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.1em] ${
+                      step.key === "delivery" && jiraExportStage === "complete"
+                        ? "border-[rgba(56,255,179,0.36)] bg-[rgba(56,255,179,0.16)] text-[var(--success)]"
+                        : step.isComplete
+                          ? "border-[rgba(56,255,179,0.34)] bg-[rgba(56,255,179,0.12)] text-[var(--success)]"
+                          : "border-[rgba(120,145,255,0.18)] bg-[rgba(255,255,255,0.05)] text-[var(--text-muted)]"
+                    }`}
+                  >
+                    {step.key === "delivery" && jiraExportStage === "complete" ? "Exported" : step.isComplete ? "Active" : "Pending"}
+                  </span>
+                </div>
+                <p className="mt-3 text-sm text-[var(--text-secondary)]">{step.detail}</p>
+                {step.key === "delivery" && (
+                  <div className="mt-4 flex flex-wrap gap-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setDeliveryOptionSelected(true);
+                        setJiraExportModalOpen(true);
+                      }}
+                      className={`inline-flex rounded-full border px-3 py-1.5 text-xs font-semibold transition hover:text-[var(--text-primary)] ${
+                        jiraExportStage === "complete"
+                          ? "border-[rgba(56,255,179,0.34)] bg-[rgba(56,255,179,0.14)] text-[var(--success)]"
+                          : "border-[rgba(108,242,255,0.28)] bg-[rgba(108,242,255,0.1)] text-[var(--accent)]"
+                      }`}
+                    >
+                      {jiraExportStage === "complete" ? `View ${selectedTicketFormat.label}` : `Open ${selectedTicketFormat.label}`}
+                    </button>
+                    {jiraProjectUrl && (
+                      <a
+                        href={jiraProjectUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                        className={`inline-flex rounded-full border px-3 py-1.5 text-xs font-semibold transition hover:text-[var(--text-primary)] ${
+                          jiraExportStage === "complete"
+                            ? "border-[rgba(56,255,179,0.28)] bg-[rgba(56,255,179,0.1)] text-[var(--success)]"
+                            : "border-[rgba(120,145,255,0.2)] bg-[rgba(255,255,255,0.04)] text-[var(--text-secondary)]"
+                        }`}
+                      >
+                        {jiraExportStage === "complete" ? "Open Exported Jira Project" : "Open Jira Project"}
+                      </a>
+                    )}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+
+          {!showDeliveryStep && (
+            <div className="rounded-[26px] border border-[rgba(120,145,255,0.18)] bg-[linear-gradient(180deg,rgba(9,14,36,0.82)_0%,rgba(7,11,28,0.9)_100%)] p-4 sm:p-5">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <p className="text-xs font-semibold uppercase tracking-[0.14em] text-[var(--text-muted)]">Choose Delivery Path</p>
+                  <p className="mt-2 text-lg font-semibold text-[var(--text-primary)]">Pick how this meeting should turn into Jira work</p>
+                </div>
+                <span className="rounded-full border border-[rgba(120,145,255,0.18)] bg-[rgba(255,255,255,0.04)] px-3 py-1 text-xs font-medium text-[var(--text-secondary)]">
+                  Step 4 appears after selection
+                </span>
+              </div>
+
+              <div className="mt-4 grid gap-3 xl:grid-cols-2">
+                {stepFourOptions.map((option) => (
+                  <button
+                    key={option.id}
+                    type="button"
+                    onClick={() => {
+                      setTicketFormatPreset(option.id);
+                      setDeliveryOptionSelected(true);
+                      setJiraExportModalOpen(true);
+                    }}
+                    className={`w-full rounded-2xl border p-4 text-left transition ${option.accentClass}`}
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <div>
+                        <p className="text-sm font-semibold text-[var(--text-primary)]">{option.title}</p>
+                        <p className="mt-1 text-xs leading-5 text-[var(--text-secondary)]">{option.detail}</p>
+                      </div>
+                      <span className="rounded-full border border-[rgba(120,145,255,0.2)] bg-[rgba(255,255,255,0.04)] px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.08em] text-[var(--text-muted)]">
+                        Select
+                      </span>
+                    </div>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          <div className="rounded-[26px] border border-[rgba(120,145,255,0.18)] bg-[linear-gradient(180deg,rgba(9,14,36,0.82)_0%,rgba(7,11,28,0.9)_100%)] p-4 sm:p-5">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-[0.14em] text-[var(--text-muted)]">Execution Sequence</p>
+                <p className="mt-2 text-lg font-semibold text-[var(--text-primary)]">Action-by-action flow</p>
+              </div>
+              <span className="rounded-full border border-[rgba(120,145,255,0.18)] bg-[rgba(255,255,255,0.04)] px-3 py-1 text-xs font-medium text-[var(--text-secondary)]">
+                Ordered by current plan sequence
+              </span>
+            </div>
+
+            {data.actions.length === 0 ? (
+              <div className="mt-4 rounded-2xl border border-dashed border-[rgba(120,145,255,0.18)] bg-[rgba(255,255,255,0.02)] p-6 text-sm text-[var(--text-secondary)]">
+                No actions generated yet.
+              </div>
+            ) : (
+              <div className="mt-5 overflow-x-auto pb-2">
+                <div className="flex min-w-max items-stretch gap-4">
+                  {data.actions.map((action, index) => (
+                    <div key={action.id} className="flex items-center gap-4">
+                      <div className="w-[280px] rounded-[24px] border border-[rgba(120,145,255,0.18)] bg-[rgba(255,255,255,0.04)] p-4 shadow-[0_20px_40px_-30px_rgba(0,0,0,0.9)]">
+                        <div className="flex items-start justify-between gap-3">
+                          <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-2xl border border-[rgba(120,145,255,0.2)] bg-[rgba(7,12,30,0.72)] text-sm font-semibold text-[var(--text-primary)]">
+                            {index + 1}
+                          </span>
+                          <div className="flex flex-wrap justify-end gap-2">
+                            <span className={`rounded-full border px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.08em] ${statusBadgeClass[action.status]}`}>
+                              {formatActionStatusLabel(action.status)}
+                            </span>
+                            <span className={`rounded-full border px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.08em] ${priorityBadgeClass[action.priority]}`}>
+                              {formatActionPriorityLabel(action.priority)}
+                            </span>
+                          </div>
+                        </div>
+
+                        <p className="mt-4 text-sm font-semibold leading-6 text-[var(--text-primary)]">{action.description}</p>
+
+                        <div className="mt-4 space-y-2 text-xs text-[var(--text-secondary)]">
+                          <p>
+                            <span className="font-semibold text-[var(--text-primary)]">Owner:</span> {action.ownerEmail || "Unassigned"}
+                          </p>
+                          <p>
+                            <span className="font-semibold text-[var(--text-primary)]">Due:</span>{" "}
+                            {action.dueDate ? new Date(action.dueDate).toLocaleDateString() : "Not set"}
+                          </p>
+                          <p>
+                            <span className="font-semibold text-[var(--text-primary)]">Jira:</span> {jiraSyncLabel[action.jiraSyncStatus]}
+                          </p>
+                        </div>
+
+                        {action.jiraIssueUrl && (
+                          <a
+                            href={action.jiraIssueUrl}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="mt-4 inline-flex rounded-full border border-[rgba(108,242,255,0.28)] bg-[rgba(108,242,255,0.1)] px-3 py-1.5 text-xs font-semibold text-[var(--accent)] transition hover:text-[var(--text-primary)]"
+                          >
+                            Open Jira Ticket
+                          </a>
+                        )}
+                      </div>
+
+                      {index < data.actions.length - 1 && (
+                        <div className="flex shrink-0 items-center gap-2 text-[var(--text-muted)]">
+                          <div className="h-px w-8 bg-[linear-gradient(90deg,rgba(120,145,255,0.45)_0%,rgba(120,145,255,0.12)_100%)]" />
+                          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" className="h-4 w-4">
+                            <path d="M5 12h14" />
+                            <path d="m13 6 6 6-6 6" />
+                          </svg>
+                          <div className="h-px w-8 bg-[linear-gradient(90deg,rgba(120,145,255,0.12)_0%,rgba(120,145,255,0.45)_100%)]" />
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      </Card>
+    );
+  };
+
   const renderIntegrationsPanel = () => (
     <div className="space-y-6">
       <Card title="Platform Sync" subtitle="See whether your account is linked before sending tickets out">
@@ -474,110 +1271,45 @@ export default function ReviewPage() {
             return (
               <div
                 key={platform.name}
-                className="flex items-start justify-between gap-3 rounded-xl border border-[var(--border)] bg-[var(--surface-strong)] p-3"
+                className="flex items-start justify-between gap-3 rounded-2xl border border-[rgba(120,145,255,0.16)] bg-[linear-gradient(135deg,rgba(255,255,255,0.045)_0%,rgba(255,255,255,0.02)_100%)] p-4"
               >
                 <div>
                   <p className="text-sm font-semibold text-[var(--text-primary)]">{platform.name}</p>
                   <p className="mt-1 text-xs text-[var(--text-secondary)]">{platform.detail}</p>
                   <p className="mt-2 text-[11px] text-[var(--text-muted)]">{meta.description}</p>
                 </div>
-                <StatusPill label={meta.label} tone={meta.tone} />
+                <div className="flex items-center gap-2">
+                  <StatusPill label={meta.label} tone={meta.tone} />
+                  {platform.name === "Jira" && platform.state === "available" && (
+                    <button
+                      type="button"
+                      onClick={handleConnectJira}
+                      className="inline-flex items-center gap-2 rounded-full border border-[rgba(56,255,179,0.3)] bg-[rgba(56,255,179,0.12)] px-3 py-1.5 text-xs font-semibold text-[var(--success)] transition hover:border-[rgba(56,255,179,0.46)] hover:bg-[rgba(56,255,179,0.18)] hover:text-[var(--text-primary)]"
+                    >
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" className="h-3.5 w-3.5">
+                        <path d="M12 5v14" />
+                        <path d="M5 12h14" />
+                      </svg>
+                      Sync
+                    </button>
+                  )}
+                  {platform.name === "Jira" && platform.state === "connected" && (
+                    <button
+                      type="button"
+                      onClick={() => void handleDisconnectJira()}
+                      disabled={jiraDisconnecting}
+                      className="inline-flex items-center gap-2 rounded-full border border-[rgba(255,107,122,0.28)] bg-[rgba(255,107,122,0.1)] px-3 py-1.5 text-xs font-semibold text-[var(--danger)] transition hover:border-[rgba(255,107,122,0.44)] hover:bg-[rgba(255,107,122,0.16)] hover:text-[var(--text-primary)] disabled:cursor-not-allowed disabled:opacity-60"
+                    >
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" className="h-3.5 w-3.5">
+                        <path d="M5 12h14" />
+                      </svg>
+                      {jiraDisconnecting ? "Unsyncing..." : "Unsync"}
+                    </button>
+                  )}
+                </div>
               </div>
             );
           })}
-        </div>
-      </Card>
-
-      <Card title="Jira Export" subtitle="Directly create Jira issues from confirmed actions">
-        <div className="space-y-3 text-sm text-[var(--text-secondary)]">
-          {!jiraStatus?.configured && (
-            <p>Set `JIRA_CLIENT_ID`, `JIRA_CLIENT_SECRET`, and `JIRA_REDIRECT_URI` in the API env first.</p>
-          )}
-
-          {jiraStatus?.configured && !jiraStatus.connected && (
-            <div className="space-y-2">
-              <p>Jira is not connected yet.</p>
-              <Button variant="secondary" onClick={handleConnectJira}>
-                Connect Jira
-              </Button>
-            </div>
-          )}
-
-          {jiraStatus?.configured && jiraStatus.connected && (
-            <div className="space-y-3">
-              {jiraConnectedNotice && (
-                <div className="rounded-xl border border-[rgba(56,255,179,0.35)] bg-[rgba(56,255,179,0.1)] p-3">
-                  <p className="text-sm font-semibold text-[var(--text-primary)]">Jira connected successfully</p>
-                  <p className="mt-1 text-xs text-[var(--text-secondary)]">
-                    Choose a site and project, then export the confirmed action plan.
-                  </p>
-                </div>
-              )}
-              <div className="grid gap-3">
-                <select
-                  value={jiraCloudId}
-                  onChange={(event) => setJiraCloudId(event.target.value)}
-                  className="rounded-xl border border-[var(--border)] bg-[var(--surface-strong)] px-3 py-2 text-sm text-[var(--text-primary)] outline-none focus:border-[var(--accent)]"
-                  disabled={jiraLoading || jiraExporting}
-                >
-                  {jiraSites.map((site) => (
-                    <option key={site.id} value={site.id}>
-                      {site.name}
-                    </option>
-                  ))}
-                </select>
-
-                <select
-                  value={jiraProjectKey}
-                  onChange={(event) => setJiraProjectKey(event.target.value)}
-                  className="rounded-xl border border-[var(--border)] bg-[var(--surface-strong)] px-3 py-2 text-sm text-[var(--text-primary)] outline-none focus:border-[var(--accent)]"
-                  disabled={jiraLoading || jiraExporting || jiraProjects.length === 0}
-                >
-                  {jiraProjects.map((project) => (
-                    <option key={project.id} value={project.key}>
-                      {project.key} - {project.name}
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              <Button
-                variant="secondary"
-                onClick={handleExportToJira}
-                disabled={jiraExporting || !data?.meeting.actionsConfirmed || !jiraCloudId || !jiraProjectKey || !data || data.actions.length === 0}
-              >
-                {jiraExporting ? "Exporting..." : "Export To Jira"}
-              </Button>
-              <Button variant="ghost" onClick={() => void loadJiraState()} disabled={jiraLoading || jiraExporting}>
-                {jiraLoading ? "Refreshing Jira..." : "Refresh Jira"}
-              </Button>
-
-              {!data?.meeting.actionsConfirmed && (
-                <p className="text-xs text-[var(--warning)]">Confirm the action plan before exporting.</p>
-              )}
-
-              {jiraResult && (
-                <div className="rounded-xl border border-[var(--border)] bg-[var(--surface-strong)] p-3">
-                  <p className="text-sm font-semibold text-[var(--text-primary)]">
-                    Created {jiraResult.createdCount} Jira issues
-                  </p>
-                  <div className="mt-2 space-y-1 text-xs">
-                    {jiraResult.issues.map((issue) => (
-                      <a
-                        key={issue.key}
-                        href={issue.url}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="block text-[var(--accent)] hover:underline"
-                      >
-                        {issue.key}
-                      </a>
-                    ))}
-                  </div>
-                </div>
-              )}
-            </div>
-          )}
         </div>
       </Card>
     </div>
@@ -934,37 +1666,31 @@ export default function ReviewPage() {
       id: SettingsPanelTab;
       label: string;
       eyebrow: string;
-      summary: string;
     }> = [
       {
         id: "formats",
         label: "Formats",
         eyebrow: "Templates",
-        summary: "Choose the enterprise ticket structure used for exports.",
       },
       {
         id: "export-target",
         label: "Export Target",
         eyebrow: "Destination",
-        summary: "See which delivery system is active for this meeting.",
       },
       {
         id: "project",
         label: "Project",
         eyebrow: "Routing",
-        summary: "Control where approved actions are sent.",
       },
       {
         id: "fields",
         label: "Fields",
         eyebrow: "Payload",
-        summary: "Set the Jira issue fields that should be sent on export.",
       },
       {
         id: "automation",
         label: "Automation",
         eyebrow: "Workflow",
-        summary: "Manage future automation defaults for this meeting.",
       },
     ];
 
@@ -972,8 +1698,8 @@ export default function ReviewPage() {
       switch (settingsPanelTab) {
         case "export-target":
           return (
-            <div className="rounded-2xl border border-[var(--border)] bg-[var(--surface-strong)] p-4">
-              <p className="text-xs font-semibold uppercase tracking-[0.1em] text-[var(--text-muted)]">Default Export Target</p>
+            <div className="rounded-[28px] border border-[var(--border)] bg-[var(--surface-strong)] p-6">
+              <p className="text-lg font-semibold text-[var(--text-primary)]">Default Export Target</p>
               <p className="mt-3 text-lg font-semibold text-[var(--text-primary)]">
                 {jiraStatus?.connected ? "Jira connected and available" : "No export target connected yet"}
               </p>
@@ -984,8 +1710,8 @@ export default function ReviewPage() {
           );
         case "project":
           return (
-            <div className="rounded-2xl border border-[var(--border)] bg-[var(--surface-strong)] p-4">
-              <p className="text-xs font-semibold uppercase tracking-[0.1em] text-[var(--text-muted)]">Preferred Project</p>
+            <div className="rounded-[28px] border border-[var(--border)] bg-[var(--surface-strong)] p-6">
+              <p className="text-lg font-semibold text-[var(--text-primary)]">Preferred Project</p>
               <p className="mt-3 text-lg font-semibold text-[var(--text-primary)]">{jiraProjectKey || "No Jira project selected yet"}</p>
               <p className="mt-2 text-sm text-[var(--text-secondary)]">
                 Pick a Jira site and project from the Integrations area. This setting reflects the current meeting target.
@@ -994,99 +1720,17 @@ export default function ReviewPage() {
           );
         case "fields":
           return (
-            <div className="space-y-4 rounded-2xl border border-[rgba(120,145,255,0.24)] bg-[linear-gradient(135deg,rgba(30,123,255,0.08)_0%,rgba(143,56,255,0.08)_60%,rgba(255,180,0,0.05)_100%)] p-4">
-              <div>
-                <p className="text-xs font-semibold uppercase tracking-[0.1em] text-[var(--text-muted)]">Ticket Fields</p>
-                <p className="mt-2 text-lg font-semibold text-[var(--text-primary)]">Jira field mapping</p>
-                <p className="mt-1 text-sm text-[var(--text-secondary)]">
-                  Control the Jira issue payload sent during export. Common fields are exposed directly, and advanced JSON can inject custom Jira fields.
-                </p>
-              </div>
-
-              <div className="grid gap-4 xl:grid-cols-2">
-                <label className="space-y-2">
-                  <span className="text-xs font-semibold uppercase tracking-[0.08em] text-[var(--text-muted)]">Issue Type</span>
-                  <input
-                    value={jiraTicketDetails.issueType}
-                    onChange={(event) =>
-                      setJiraTicketDetails((current) => ({ ...current, issueType: event.target.value }))
-                    }
-                    placeholder="Task"
-                    className="w-full rounded-xl border border-[var(--border)] bg-[var(--surface-strong)] px-3 py-2 text-sm text-[var(--text-primary)] outline-none focus:border-[var(--accent)]"
-                  />
-                </label>
-
-                <label className="space-y-2">
-                  <span className="text-xs font-semibold uppercase tracking-[0.08em] text-[var(--text-muted)]">Labels</span>
-                  <input
-                    value={jiraTicketDetails.labelsText}
-                    onChange={(event) =>
-                      setJiraTicketDetails((current) => ({ ...current, labelsText: event.target.value }))
-                    }
-                    placeholder="orbitplan, customer-facing"
-                    className="w-full rounded-xl border border-[var(--border)] bg-[var(--surface-strong)] px-3 py-2 text-sm text-[var(--text-primary)] outline-none focus:border-[var(--accent)]"
-                  />
-                </label>
-
-                <label className="space-y-2">
-                  <span className="text-xs font-semibold uppercase tracking-[0.08em] text-[var(--text-muted)]">Components</span>
-                  <input
-                    value={jiraTicketDetails.componentsText}
-                    onChange={(event) =>
-                      setJiraTicketDetails((current) => ({ ...current, componentsText: event.target.value }))
-                    }
-                    placeholder="Platform API, Admin UI"
-                    className="w-full rounded-xl border border-[var(--border)] bg-[var(--surface-strong)] px-3 py-2 text-sm text-[var(--text-primary)] outline-none focus:border-[var(--accent)]"
-                  />
-                </label>
-
-                <label className="space-y-2">
-                  <span className="text-xs font-semibold uppercase tracking-[0.08em] text-[var(--text-muted)]">Environment</span>
-                  <input
-                    value={jiraTicketDetails.environment}
-                    onChange={(event) =>
-                      setJiraTicketDetails((current) => ({ ...current, environment: event.target.value }))
-                    }
-                    placeholder="Production, staging, internal admin"
-                    className="w-full rounded-xl border border-[var(--border)] bg-[var(--surface-strong)] px-3 py-2 text-sm text-[var(--text-primary)] outline-none focus:border-[var(--accent)]"
-                  />
-                </label>
-              </div>
-
-              <label className="block space-y-2">
-                <span className="text-xs font-semibold uppercase tracking-[0.08em] text-[var(--text-muted)]">Additional Context</span>
-                <textarea
-                  value={jiraTicketDetails.additionalContext}
-                  onChange={(event) =>
-                    setJiraTicketDetails((current) => ({ ...current, additionalContext: event.target.value }))
-                  }
-                  rows={4}
-                  placeholder="Escalation notes, rollout constraints, customer impact, internal references..."
-                  className="w-full rounded-xl border border-[var(--border)] bg-[var(--surface-strong)] px-3 py-2 text-sm text-[var(--text-primary)] outline-none focus:border-[var(--accent)]"
-                />
-              </label>
-
-              <label className="block space-y-2">
-                <span className="text-xs font-semibold uppercase tracking-[0.08em] text-[var(--text-muted)]">Advanced Jira Fields JSON</span>
-                <textarea
-                  value={jiraTicketDetails.advancedFieldsJson}
-                  onChange={(event) =>
-                    setJiraTicketDetails((current) => ({ ...current, advancedFieldsJson: event.target.value }))
-                  }
-                  rows={8}
-                  placeholder={'{"customfield_10011":"ENG","customfield_10020":8}'}
-                  className="w-full rounded-xl border border-[var(--border)] bg-[rgba(7,12,30,0.7)] px-3 py-2 font-mono text-sm text-[var(--text-primary)] outline-none focus:border-[var(--accent)]"
-                />
-                <p className="text-xs text-[var(--text-secondary)]">
-                  Use this for custom Jira fields such as story points, team fields, epic links, request types, or any project-specific schema.
-                </p>
-              </label>
+            <div className="rounded-[28px] border border-[rgba(120,145,255,0.24)] bg-[linear-gradient(135deg,rgba(30,123,255,0.08)_0%,rgba(143,56,255,0.08)_60%,rgba(255,180,0,0.05)_100%)] p-6">
+              <p className="text-2xl font-semibold text-[var(--text-primary)]">Jira field mapping moved</p>
+              <p className="mt-3 text-sm text-[var(--text-secondary)]">
+                Jira export fields now live directly inside the `Action Plan Flow` export section so setup and submission happen in one place.
+              </p>
             </div>
           );
         case "automation":
           return (
-            <div className="rounded-2xl border border-[var(--border)] bg-[var(--surface-strong)] p-4">
-              <p className="text-xs font-semibold uppercase tracking-[0.1em] text-[var(--text-muted)]">Automation Toggles</p>
+            <div className="rounded-[28px] border border-[var(--border)] bg-[var(--surface-strong)] p-6">
+              <p className="text-lg font-semibold text-[var(--text-primary)]">Automation Toggles</p>
               <p className="mt-3 text-lg font-semibold text-[var(--text-primary)]">Not wired yet</p>
               <p className="mt-2 text-sm text-[var(--text-secondary)]">
                 Meeting-level automation controls are not wired yet in this workspace, but this tab leaves space for those defaults.
@@ -1096,18 +1740,17 @@ export default function ReviewPage() {
         case "formats":
         default:
           return (
-            <div className="rounded-2xl border border-[rgba(120,145,255,0.24)] bg-[linear-gradient(135deg,rgba(30,123,255,0.1)_0%,rgba(143,56,255,0.08)_58%,rgba(255,180,0,0.05)_100%)] p-4">
+            <div className="rounded-[28px] border border-[rgba(120,145,255,0.24)] bg-[linear-gradient(135deg,rgba(30,123,255,0.1)_0%,rgba(143,56,255,0.08)_58%,rgba(255,180,0,0.05)_100%)] p-6">
               <div className="flex items-start justify-between gap-3">
                 <div>
-                  <p className="text-xs font-semibold uppercase tracking-[0.1em] text-[var(--text-muted)]">Formats</p>
-                  <p className="mt-2 text-lg font-semibold text-[var(--text-primary)]">Ticket creation presets</p>
+                  <p className="text-2xl font-semibold text-[var(--text-primary)]">Ticket creation presets</p>
                   <p className="mt-1 text-sm text-[var(--text-secondary)]">
                     Choose how tickets should be structured when this meeting exports actions into Jira.
                   </p>
                 </div>
               </div>
 
-              <div className="mt-4 grid gap-3 xl:grid-cols-2">
+              <div className="mt-4 grid gap-3 xl:grid-cols-2 2xl:grid-cols-3">
                 {TICKET_FORMAT_PRESETS.map((preset) => {
                   const isSelected = ticketFormatPreset === preset.id;
                   return (
@@ -1156,11 +1799,18 @@ export default function ReviewPage() {
       }
     };
 
+    const activeTab = settingsTabs.find((tab) => tab.id === settingsPanelTab) ?? settingsTabs[0];
+
     return (
       <Card title="Settings" subtitle="Meeting-level working defaults">
-        <div className="grid gap-4 lg:grid-cols-[220px_minmax(0,1fr)]">
-          <div className="rounded-2xl border border-[rgba(120,145,255,0.18)] bg-[rgba(255,255,255,0.03)] p-2">
-            <div className="space-y-2">
+        <div className="grid gap-6 xl:grid-cols-[280px_minmax(0,1fr)]">
+          <aside className="rounded-[30px] border border-[rgba(120,145,255,0.16)] bg-[linear-gradient(180deg,rgba(10,16,34,0.92)_0%,rgba(8,12,26,0.88)_100%)] p-4">
+            <div className="border-b border-[rgba(120,145,255,0.12)] px-2 pb-4">
+              <p className="text-xs font-semibold uppercase tracking-[0.16em] text-[var(--text-muted)]">Workspace Settings</p>
+              <p className="mt-2 text-lg font-semibold text-[var(--text-primary)]">Export configuration</p>
+            </div>
+
+            <nav className="mt-4 space-y-2">
               {settingsTabs.map((tab) => {
                 const isActive = settingsPanelTab === tab.id;
                 return (
@@ -1168,22 +1818,37 @@ export default function ReviewPage() {
                     key={tab.id}
                     type="button"
                     onClick={() => setSettingsPanelTab(tab.id)}
-                    className={`w-full rounded-2xl border px-3 py-3 text-left transition ${
+                    className={`w-full rounded-[22px] border px-4 py-4 text-left transition ${
                       isActive
-                        ? "border-[rgba(56,255,179,0.32)] bg-[rgba(56,255,179,0.12)] shadow-[0_16px_28px_-24px_rgba(56,255,179,0.8)]"
-                        : "border-transparent bg-[rgba(7,12,30,0.34)] hover:border-[rgba(120,145,255,0.24)] hover:bg-[rgba(255,255,255,0.04)]"
+                        ? "border-[rgba(120,145,255,0.22)] bg-[linear-gradient(135deg,rgba(56,255,179,0.14)_0%,rgba(120,145,255,0.14)_100%)] shadow-[0_20px_36px_-28px_rgba(56,255,179,0.55)]"
+                        : "border-transparent bg-transparent hover:border-[rgba(120,145,255,0.14)] hover:bg-[rgba(255,255,255,0.035)]"
                     }`}
                   >
-                    <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-[var(--text-muted)]">{tab.eyebrow}</p>
-                    <p className="mt-1 text-sm font-semibold text-[var(--text-primary)]">{tab.label}</p>
-                    <p className="mt-1 text-xs text-[var(--text-secondary)]">{tab.summary}</p>
+                    <p className="text-xs font-medium tracking-[0.08em] text-[var(--text-muted)]">{tab.eyebrow}</p>
+                    <div className="mt-2 flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <p className="text-base font-semibold text-[var(--text-primary)]">{tab.label}</p>
+                      </div>
+                      <span
+                        className={`mt-0.5 h-2.5 w-2.5 rounded-full ${
+                          isActive ? "bg-[var(--success)] shadow-[0_0_0_4px_rgba(56,255,179,0.12)]" : "bg-[rgba(120,145,255,0.24)]"
+                        }`}
+                      />
+                    </div>
                   </button>
                 );
               })}
-            </div>
-          </div>
+            </nav>
+          </aside>
 
-          <div className="min-w-0">{renderSettingsContent()}</div>
+          <div className="min-w-0 rounded-[30px] border border-[rgba(120,145,255,0.16)] bg-[rgba(255,255,255,0.025)] p-4 sm:p-5 xl:p-6">
+            <div className="border-b border-[rgba(120,145,255,0.12)] pb-4">
+              <p className="text-xs font-semibold uppercase tracking-[0.16em] text-[var(--text-muted)]">{activeTab.eyebrow}</p>
+              <p className="mt-2 text-2xl font-semibold text-[var(--text-primary)]">{activeTab.label}</p>
+            </div>
+
+            <div className="min-w-0 pt-5">{renderSettingsContent()}</div>
+          </div>
         </div>
       </Card>
     );
@@ -1239,10 +1904,29 @@ export default function ReviewPage() {
 
   useEffect(() => {
     if (typeof window === "undefined") return;
+    const storedValue = window.localStorage.getItem(`orbitplan:delivery-option-selected:${id}`);
+    if (storedValue === "true") {
+      setDeliveryOptionSelected(true);
+    }
+  }, [id]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(`orbitplan:delivery-option-selected:${id}`, deliveryOptionSelected ? "true" : "false");
+  }, [deliveryOptionSelected, id]);
+
+  useEffect(() => {
+    if (linkedActionCount > 0 || jiraExportStage !== "idle" || Boolean(jiraResult?.issues.length)) {
+      setDeliveryOptionSelected(true);
+    }
+  }, [jiraExportStage, jiraResult, linkedActionCount]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
     const storedValue = window.localStorage.getItem(`orbitplan:jira-ticket-details:${id}`);
     if (!storedValue) return;
     try {
-      const parsed = JSON.parse(storedValue) as Partial<JiraTicketDetailsDraft>;
+      const parsed = JSON.parse(storedValue) as Partial<JiraTicketDetailsDraft & { dynamicFieldValues?: JiraDynamicFieldValues }>;
       setJiraTicketDetails({
         issueType: parsed.issueType?.trim() || DEFAULT_JIRA_TICKET_DETAILS.issueType,
         labelsText: parsed.labelsText ?? DEFAULT_JIRA_TICKET_DETAILS.labelsText,
@@ -1251,6 +1935,7 @@ export default function ReviewPage() {
         additionalContext: parsed.additionalContext ?? DEFAULT_JIRA_TICKET_DETAILS.additionalContext,
         advancedFieldsJson: parsed.advancedFieldsJson ?? DEFAULT_JIRA_TICKET_DETAILS.advancedFieldsJson,
       });
+      setJiraDynamicFieldValues(parsed.dynamicFieldValues ?? {});
     } catch {
       window.localStorage.removeItem(`orbitplan:jira-ticket-details:${id}`);
     }
@@ -1258,8 +1943,14 @@ export default function ReviewPage() {
 
   useEffect(() => {
     if (typeof window === "undefined") return;
-    window.localStorage.setItem(`orbitplan:jira-ticket-details:${id}`, JSON.stringify(jiraTicketDetails));
-  }, [id, jiraTicketDetails]);
+    window.localStorage.setItem(
+      `orbitplan:jira-ticket-details:${id}`,
+      JSON.stringify({
+        ...jiraTicketDetails,
+        dynamicFieldValues: jiraDynamicFieldValues,
+      }),
+    );
+  }, [id, jiraDynamicFieldValues, jiraTicketDetails]);
 
   const loadJiraState = async () => {
     setJiraLoading(true);
@@ -1324,14 +2015,55 @@ export default function ReviewPage() {
   }, [jiraCloudId, jiraStatus?.connected]);
 
   useEffect(() => {
+    if (!jiraStatus?.connected || !jiraCloudId || !jiraProjectKey) {
+      setJiraIssueTypes([]);
+      return;
+    }
+
+    let isMounted = true;
+    const loadCreateMeta = async () => {
+      setJiraCreateMetaLoading(true);
+      try {
+        const issueTypes = await getJiraCreateMeta(jiraCloudId, jiraProjectKey);
+        if (!isMounted) return;
+        setJiraIssueTypes(issueTypes);
+        if (!issueTypes.some((issueType) => issueType.name === jiraTicketDetails.issueType || issueType.id === jiraTicketDetails.issueType)) {
+          const fallback = issueTypes[0]?.name ?? "Task";
+          setJiraTicketDetails((current) => ({ ...current, issueType: fallback }));
+        }
+      } catch (jiraMetaError) {
+        if (isMounted) setError(jiraMetaError instanceof Error ? jiraMetaError.message : "Failed to load Jira field metadata");
+      } finally {
+        if (isMounted) setJiraCreateMetaLoading(false);
+      }
+    };
+
+    void loadCreateMeta();
+    return () => {
+      isMounted = false;
+    };
+  }, [jiraCloudId, jiraProjectKey, jiraStatus?.connected, jiraTicketDetails.issueType]);
+
+  useEffect(() => {
     const handleMessage = (event: MessageEvent) => {
       if (event.data?.type !== "orbitplan:jira-connected") return;
       setJiraConnectedNotice(true);
+      if (jiraConnectPollRef.current) {
+        window.clearInterval(jiraConnectPollRef.current);
+        jiraConnectPollRef.current = null;
+      }
+      jiraConnectWindowRef.current = null;
       void loadJiraState();
     };
 
     window.addEventListener("message", handleMessage);
-    return () => window.removeEventListener("message", handleMessage);
+    return () => {
+      if (jiraConnectPollRef.current) {
+        window.clearInterval(jiraConnectPollRef.current);
+        jiraConnectPollRef.current = null;
+      }
+      window.removeEventListener("message", handleMessage);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -1339,11 +2071,12 @@ export default function ReviewPage() {
     if (activeTab !== "chat") return;
     if (!hasSeededChatRef.current && chatMessages.length === 0) {
       hasSeededChatRef.current = true;
+      void playChatMessageTone("assistant");
       setChatMessages([
         {
           id: `a-welcome-${Date.now()}`,
           role: "assistant",
-          text: "Hi, I am OrbitBot. How can I assist you with this meeting? You can ask about decisions, owners, risks, timelines, or next steps.",
+          text: "Hi, I am OrbitBot. How can I assist you with this meeting? You can ask about decisions, owners, risks, timelines, next steps, or ask me to translate transcript content.",
           createdAt: new Date().toISOString(),
         },
       ]);
@@ -1356,6 +2089,24 @@ export default function ReviewPage() {
     });
     return () => window.cancelAnimationFrame(id);
   }, [chatMessages, chatLoading, activeTab]);
+
+  useEffect(() => {
+    const previousIds = previousChatMessageIdsRef.current;
+    const previousSet = new Set(previousIds);
+    const newMessages = chatMessages.filter((message) => !previousSet.has(message.id));
+
+    if (previousIds.length > 0 && activeTab === "chat" && newMessages.length > 0) {
+      if (suppressNextChatSoundRef.current) {
+        suppressNextChatSoundRef.current = false;
+      } else {
+        newMessages.forEach((message, index) => {
+          void playChatMessageTone(message.role, index * 120);
+        });
+      }
+    }
+
+    previousChatMessageIdsRef.current = chatMessages.map((message) => message.id);
+  }, [chatMessages, activeTab]);
 
   const handleApprove = async () => {
     if (!data) return;
@@ -1418,6 +2169,7 @@ export default function ReviewPage() {
     setChatHistoryLoading(true);
     setError(null);
     try {
+      suppressNextChatSoundRef.current = true;
       const history = await getMeetingChatHistory(data.meeting.id, {
         limit: CHAT_PAGE_SIZE,
         before: chatCursor,
@@ -1498,17 +2250,406 @@ export default function ReviewPage() {
   const handleConnectJira = async () => {
     try {
       const url = await getJiraAuthUrl();
-      window.open(url, "_blank", "noopener,noreferrer");
+      const popup = window.open(url, "orbitplan-jira-connect", "popup=yes,width=720,height=760");
+      if (!popup) {
+        window.location.href = url;
+        return;
+      }
+
+      jiraConnectWindowRef.current = popup;
+      popup.focus();
+
+      if (jiraConnectPollRef.current) {
+        window.clearInterval(jiraConnectPollRef.current);
+      }
+
+      jiraConnectPollRef.current = window.setInterval(() => {
+        const connectWindow = jiraConnectWindowRef.current;
+        if (!connectWindow || connectWindow.closed) {
+          if (jiraConnectPollRef.current) {
+            window.clearInterval(jiraConnectPollRef.current);
+            jiraConnectPollRef.current = null;
+          }
+          jiraConnectWindowRef.current = null;
+          void loadJiraState();
+        }
+      }, 700);
     } catch (jiraError) {
       setError(jiraError instanceof Error ? jiraError.message : "Failed to start Jira connection");
     }
   };
 
+  const handleDisconnectJira = async () => {
+    setJiraDisconnecting(true);
+    setError(null);
+    try {
+      await disconnectJira();
+      setJiraCloudId("");
+      setJiraProjectKey("");
+      setJiraProjects([]);
+      setJiraSites([]);
+      setJiraStatus((current) => (current ? { ...current, connected: false } : current));
+      await loadJiraState();
+    } catch (disconnectError) {
+      setError(disconnectError instanceof Error ? disconnectError.message : "Failed to disconnect Jira");
+    } finally {
+      setJiraDisconnecting(false);
+    }
+  };
+
+  const handleResyncAction = async (actionId: string) => {
+    if (!data || resyncingActionId) return;
+    setResyncingActionId(actionId);
+    setError(null);
+    try {
+      const updated = await resyncMeetingAction(data.meeting.id, actionId);
+      setData(updated);
+    } catch (resyncError) {
+      setError(resyncError instanceof Error ? resyncError.message : "Failed to resync Jira action");
+    } finally {
+      setResyncingActionId(null);
+    }
+  };
+
+  const setDynamicFieldValue = (fieldKey: string, value: string | string[]) => {
+    setJiraDynamicFieldValues((current) => ({
+      ...current,
+      [fieldKey]: value,
+    }));
+  };
+
+  const isUserPickerField = (field: JiraCreateFieldMeta) =>
+    field.schemaType === "user" || field.custom?.toLowerCase().includes("userpicker");
+  const isTeamLikeField = (field: JiraCreateFieldMeta) =>
+    field.custom?.toLowerCase().includes("team") || field.custom?.toLowerCase().includes("sd-customerorganization");
+  const isCascadingSelectField = (field: JiraCreateFieldMeta) => field.custom?.toLowerCase().includes("cascadingselect");
+  const isVersionLikeField = (field: JiraCreateFieldMeta) =>
+    field.schemaType === "version" || field.itemsType === "version" || field.custom?.toLowerCase().includes("version");
+  const isSprintLikeField = (field: JiraCreateFieldMeta) => field.custom?.toLowerCase().includes("sprint");
+  const isEpicLikeField = (field: JiraCreateFieldMeta) =>
+    field.custom?.toLowerCase().includes("epic") || field.name.toLowerCase().includes("epic");
+  const isOptionArrayField = (field: JiraCreateFieldMeta) => field.schemaType === "array" && Boolean(field.allowedValues?.length);
+
+  const mapOptionValue = (field: JiraCreateFieldMeta, selected: string) => {
+    const option = field.allowedValues?.find((allowed) => allowed.id === selected || allowed.label === selected);
+    const optionId = option?.id ?? selected;
+
+    if (isUserPickerField(field)) return { accountId: optionId };
+    if (isTeamLikeField(field)) return { id: optionId };
+    if (isVersionLikeField(field)) return { id: optionId };
+    return { id: optionId };
+  };
+
+  const getFieldPlaceholder = (field: JiraCreateFieldMeta) => {
+    if (isSprintLikeField(field)) return "Sprint name or ID";
+    if (isEpicLikeField(field)) return "Epic key or ID";
+    if (isUserPickerField(field)) return "Assignee or reporter";
+    if (isTeamLikeField(field)) return "Team or organization";
+    if (field.schemaType === "number") return "0";
+    if (field.schemaType === "date") return "YYYY-MM-DD";
+    return `Enter ${field.name.toLowerCase()}`;
+  };
+
+  const getLookupKind = (field: JiraCreateFieldMeta): "user" | "issue" | "epic" | "sprint" | null => {
+    if (isUserPickerField(field)) return "user";
+    if (isSprintLikeField(field)) return "sprint";
+    if (isEpicLikeField(field)) return "epic";
+    if (field.schemaType === "issuelinks" || field.schemaType === "issue") return "issue";
+    return null;
+  };
+
+  const loadJiraLookupResults = (field: JiraCreateFieldMeta, query: string) => {
+    const kind = getLookupKind(field);
+    if (!kind || !jiraCloudId || !jiraProjectKey || query.trim().length < 2) {
+      setJiraLookupResults((current) => ({ ...current, [field.key]: [] }));
+      return;
+    }
+
+    if (jiraLookupTimeoutsRef.current[field.key]) {
+      clearTimeout(jiraLookupTimeoutsRef.current[field.key]);
+    }
+
+    jiraLookupTimeoutsRef.current[field.key] = setTimeout(() => {
+      void (async () => {
+        setJiraLookupLoading((current) => ({ ...current, [field.key]: true }));
+        try {
+          const items = await getJiraLookup(jiraCloudId, jiraProjectKey, kind, query.trim());
+          setJiraLookupResults((current) => ({ ...current, [field.key]: items }));
+        } catch (lookupError) {
+          setError(lookupError instanceof Error ? lookupError.message : "Failed to load Jira lookup results");
+        } finally {
+          setJiraLookupLoading((current) => ({ ...current, [field.key]: false }));
+        }
+      })();
+    }, 250);
+  };
+
+  const buildDynamicJiraFields = () => {
+    const dynamicFields: Record<string, unknown> = {};
+
+    for (const field of jiraDynamicFields) {
+      const rawValue = jiraDynamicFieldValues[field.key];
+      if (rawValue == null || rawValue === "" || (Array.isArray(rawValue) && rawValue.length === 0)) continue;
+
+      if (isCascadingSelectField(field)) {
+        const [parentId, childId] = String(rawValue).split("::");
+        if (parentId) {
+          dynamicFields[field.key] = {
+            id: parentId,
+            ...(childId ? { child: { id: childId } } : {}),
+          };
+        }
+        continue;
+      }
+
+      if (field.allowedValues && field.allowedValues.length > 0) {
+        if (isOptionArrayField(field)) {
+          const selectedValues = Array.isArray(rawValue) ? rawValue : String(rawValue).split(",").map((item) => item.trim()).filter(Boolean);
+          dynamicFields[field.key] = selectedValues.map((selected) => mapOptionValue(field, selected));
+          continue;
+        }
+
+        dynamicFields[field.key] = mapOptionValue(field, String(rawValue));
+        continue;
+      }
+
+      if (isUserPickerField(field)) {
+        dynamicFields[field.key] = { accountId: String(rawValue) };
+        continue;
+      }
+
+      if (isTeamLikeField(field) || isVersionLikeField(field) || isSprintLikeField(field) || isEpicLikeField(field)) {
+        dynamicFields[field.key] = { id: String(rawValue) };
+        continue;
+      }
+
+      if (field.schemaType === "number") {
+        const parsed = Number(rawValue);
+        if (!Number.isNaN(parsed)) dynamicFields[field.key] = parsed;
+        continue;
+      }
+
+      if (field.schemaType === "array") {
+        dynamicFields[field.key] = Array.isArray(rawValue)
+          ? rawValue
+          : String(rawValue)
+              .split(",")
+              .map((item) => item.trim())
+              .filter(Boolean);
+        continue;
+      }
+
+      dynamicFields[field.key] = rawValue;
+    }
+
+    return dynamicFields;
+  };
+
+  const renderDynamicJiraField = (field: JiraCreateFieldMeta) => {
+    const value = jiraDynamicFieldValues[field.key];
+
+    if (isCascadingSelectField(field) && field.allowedValues && field.allowedValues.length > 0) {
+      const [selectedParent = "", selectedChild = ""] = typeof value === "string" ? value.split("::") : ["", ""];
+      const childOptions = field.allowedValues.find((option) => option.id === selectedParent)?.children ?? [];
+
+      return (
+        <div key={field.key} className="grid gap-3">
+          <label className="block space-y-2">
+            <span className="text-sm font-medium text-[var(--text-secondary)]">
+              {field.name} {field.required ? "*" : ""}
+            </span>
+            <select
+              value={selectedParent}
+              onChange={(event) => setDynamicFieldValue(field.key, event.target.value)}
+              className="w-full rounded-xl border border-[var(--border)] bg-[var(--surface-strong)] px-3 py-2 text-sm text-[var(--text-primary)] outline-none focus:border-[var(--accent)]"
+            >
+              <option value="">Select {field.name}</option>
+              {field.allowedValues.map((option) => (
+                <option key={`${field.key}-${option.id}`} value={option.id}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          {childOptions.length > 0 && (
+            <label className="block space-y-2">
+              <span className="text-sm font-medium text-[var(--text-secondary)]">Child Option</span>
+              <select
+                value={selectedChild}
+                onChange={(event) => setDynamicFieldValue(field.key, `${selectedParent}::${event.target.value}`)}
+                className="w-full rounded-xl border border-[var(--border)] bg-[var(--surface-strong)] px-3 py-2 text-sm text-[var(--text-primary)] outline-none focus:border-[var(--accent)]"
+              >
+                <option value="">Select child option</option>
+                {childOptions.map((option) => (
+                  <option key={`${field.key}-${selectedParent}-${option.id}`} value={option.id}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
+        </div>
+      );
+    }
+
+    if (field.allowedValues && field.allowedValues.length > 0) {
+      if (isOptionArrayField(field)) {
+        const selectedValues = Array.isArray(value) ? value : [];
+        return (
+          <label key={field.key} className="block space-y-2">
+            <span className="text-sm font-medium text-[var(--text-secondary)]">
+              {field.name} {field.required ? "*" : ""}
+            </span>
+            <select
+              multiple
+              value={selectedValues}
+              onChange={(event) =>
+                setDynamicFieldValue(
+                  field.key,
+                  Array.from(event.target.selectedOptions).map((option) => option.value),
+                )
+              }
+              className="min-h-32 w-full rounded-xl border border-[var(--border)] bg-[var(--surface-strong)] px-3 py-2 text-sm text-[var(--text-primary)] outline-none focus:border-[var(--accent)]"
+            >
+              {field.allowedValues.map((option) => (
+                <option key={`${field.key}-${option.id}`} value={option.id}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </label>
+        );
+      }
+
+      return (
+        <label key={field.key} className="block space-y-2">
+          <span className="text-sm font-medium text-[var(--text-secondary)]">
+            {field.name} {field.required ? "*" : ""}
+          </span>
+          <select
+            value={typeof value === "string" ? value : ""}
+            onChange={(event) => setDynamicFieldValue(field.key, event.target.value)}
+            className="w-full rounded-xl border border-[var(--border)] bg-[var(--surface-strong)] px-3 py-2 text-sm text-[var(--text-primary)] outline-none focus:border-[var(--accent)]"
+          >
+            <option value="">Select {field.name}</option>
+            {field.allowedValues.map((option) => (
+              <option key={`${field.key}-${option.id}`} value={option.id}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+        </label>
+      );
+    }
+
+    if (field.schemaType === "number") {
+      return (
+        <label key={field.key} className="block space-y-2">
+          <span className="text-sm font-medium text-[var(--text-secondary)]">
+            {field.name} {field.required ? "*" : ""}
+          </span>
+          <input
+            type="number"
+            value={typeof value === "string" ? value : ""}
+            onChange={(event) => setDynamicFieldValue(field.key, event.target.value)}
+            placeholder={getFieldPlaceholder(field)}
+            className="w-full rounded-xl border border-[var(--border)] bg-[var(--surface-strong)] px-3 py-2 text-sm text-[var(--text-primary)] outline-none focus:border-[var(--accent)]"
+          />
+        </label>
+      );
+    }
+
+    if (field.schemaType === "date") {
+      return (
+        <label key={field.key} className="block space-y-2">
+          <span className="text-sm font-medium text-[var(--text-secondary)]">
+            {field.name} {field.required ? "*" : ""}
+          </span>
+          <input
+            type="date"
+            value={typeof value === "string" ? value : ""}
+            onChange={(event) => setDynamicFieldValue(field.key, event.target.value)}
+            placeholder={getFieldPlaceholder(field)}
+            className="w-full rounded-xl border border-[var(--border)] bg-[var(--surface-strong)] px-3 py-2 text-sm text-[var(--text-primary)] outline-none focus:border-[var(--accent)]"
+          />
+        </label>
+      );
+    }
+
+    const lookupKind = getLookupKind(field);
+    if (lookupKind) {
+      const queryValue = jiraLookupQueries[field.key] ?? (typeof value === "string" ? value : "");
+      const results = jiraLookupResults[field.key] ?? [];
+      const isLoading = Boolean(jiraLookupLoading[field.key]);
+
+      return (
+        <div key={field.key} className="space-y-2">
+          <label className="block space-y-2">
+            <span className="text-sm font-medium text-[var(--text-secondary)]">
+              {field.name} {field.required ? "*" : ""}
+            </span>
+            <input
+              value={queryValue}
+              onChange={(event) => {
+                const nextValue = event.target.value;
+                setJiraLookupQueries((current) => ({ ...current, [field.key]: nextValue }));
+                setDynamicFieldValue(field.key, nextValue);
+                loadJiraLookupResults(field, nextValue);
+              }}
+              placeholder={getFieldPlaceholder(field)}
+              className="w-full rounded-xl border border-[var(--border)] bg-[var(--surface-strong)] px-3 py-2 text-sm text-[var(--text-primary)] outline-none focus:border-[var(--accent)]"
+            />
+          </label>
+          {(isLoading || results.length > 0) && (
+            <div className="rounded-xl border border-[rgba(120,145,255,0.18)] bg-[rgba(7,12,30,0.5)] p-2">
+              {isLoading && <p className="text-xs text-[var(--text-secondary)]">Searching Jira...</p>}
+              {!isLoading && results.length > 0 && (
+                <div className="space-y-1">
+                  {results.map((item) => (
+                    <button
+                      key={`${field.key}-${item.id}`}
+                      type="button"
+                      onClick={() => {
+                        setDynamicFieldValue(field.key, item.id);
+                        setJiraLookupQueries((current) => ({ ...current, [field.key]: item.label }));
+                        setJiraLookupResults((current) => ({ ...current, [field.key]: [] }));
+                      }}
+                      className="w-full rounded-lg border border-transparent px-3 py-2 text-left transition hover:border-[rgba(120,145,255,0.2)] hover:bg-[rgba(255,255,255,0.04)]"
+                    >
+                      <p className="text-sm font-semibold text-[var(--text-primary)]">{item.label}</p>
+                      {item.secondary && <p className="text-xs text-[var(--text-secondary)]">{item.secondary}</p>}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    return (
+      <label key={field.key} className="block space-y-2">
+        <span className="text-sm font-medium text-[var(--text-secondary)]">
+          {field.name} {field.required ? "*" : ""}
+        </span>
+        <input
+          value={typeof value === "string" ? value : ""}
+          onChange={(event) => setDynamicFieldValue(field.key, event.target.value)}
+          placeholder={getFieldPlaceholder(field)}
+          className="w-full rounded-xl border border-[var(--border)] bg-[var(--surface-strong)] px-3 py-2 text-sm text-[var(--text-primary)] outline-none focus:border-[var(--accent)]"
+        />
+      </label>
+    );
+  };
+
   const handleExportToJira = async () => {
     if (!data || !jiraCloudId || !jiraProjectKey) return;
     setJiraExporting(true);
+    setJiraExportStage("scanning");
     setError(null);
     setJiraResult(null);
+    setJiraScanResult(null);
     try {
       let advancedFields: Record<string, unknown> | undefined;
       if (jiraTicketDetails.advancedFieldsJson.trim()) {
@@ -1518,8 +2659,8 @@ export default function ReviewPage() {
         }
         advancedFields = parsed as Record<string, unknown>;
       }
-
-      const result = await exportMeetingToJira({
+      const dynamicFields = buildDynamicJiraFields();
+      const exportPayload = {
         meetingId: data.meeting.id,
         cloudId: jiraCloudId,
         projectKey: jiraProjectKey,
@@ -1530,11 +2671,29 @@ export default function ReviewPage() {
           components: jiraComponents,
           environment: jiraTicketDetails.environment.trim() || undefined,
           additionalContext: jiraTicketDetails.additionalContext.trim() || undefined,
-          advancedFields,
+          advancedFields: {
+            ...dynamicFields,
+            ...(advancedFields ?? {}),
+          },
         },
-      });
+      };
+
+      const scan = await scanMeetingToJira(exportPayload);
+      setJiraScanResult(scan);
+      if (scan.blockedCount > 0) {
+        setJiraExportStage("blocked");
+        setError(`Export blocked. ${scan.blockedCount} ticket${scan.blockedCount === 1 ? "" : "s"} need review before Jira creation.`);
+        return;
+      }
+
+      setJiraExportStage("exporting");
+      const result = await exportMeetingToJira(exportPayload);
       setJiraResult(result);
+      setData(await getMeeting(data.meeting.id));
+      setJiraExportStage("complete");
+      void playJiraExportCompleteTone();
     } catch (jiraError) {
+      setJiraExportStage("idle");
       setError(jiraError instanceof Error ? jiraError.message : "Failed to export to Jira");
     } finally {
       setJiraExporting(false);
@@ -1742,7 +2901,7 @@ export default function ReviewPage() {
       idleClass: "border-[rgba(120,145,255,0.24)] bg-[rgba(255,255,255,0.03)] hover:border-[rgba(120,145,255,0.38)]",
       modalTitle: "Settings",
       modalSubtitle: "Meeting-level export defaults and automation preferences.",
-      modalWidth: "max-w-2xl",
+      modalWidth: "max-w-6xl",
     },
   ];
 
@@ -1836,7 +2995,7 @@ export default function ReviewPage() {
         {error && <p className="mb-4 text-sm font-medium text-[var(--danger)]">{error}</p>}
 
         {data && (
-          <div className="grid gap-6 lg:grid-cols-[2fr_1fr]">
+          <div className="grid gap-6 lg:grid-cols-[minmax(0,2.25fr)_minmax(360px,1fr)] 2xl:grid-cols-[minmax(0,2.45fr)_minmax(420px,1fr)]">
           <div className="space-y-6">
             <Card
               title={data.meeting.title}
@@ -2021,6 +3180,8 @@ export default function ReviewPage() {
                 </div>
               </div>
             </Card>
+
+            {renderActionPlanFlowchart()}
           </div>
 
           <div className="space-y-4">
@@ -2044,6 +3205,42 @@ export default function ReviewPage() {
           </div>
           </div>
         )}
+
+        <AnimatePresence>
+          {jiraExportModalOpen && (
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="fixed inset-0 z-50 flex items-center justify-center bg-[rgba(2,4,12,0.72)] p-4 backdrop-blur-md"
+              onClick={() => setJiraExportModalOpen(false)}
+            >
+              <motion.div
+                initial={{ opacity: 0, y: 24, scale: 0.96 }}
+                animate={{ opacity: 1, y: 0, scale: 1 }}
+                exit={{ opacity: 0, y: 16, scale: 0.98 }}
+                transition={{ duration: 0.2, ease: "easeOut" }}
+                className="max-h-[85vh] w-full max-w-6xl overflow-auto rounded-[28px] border border-[rgba(120,145,255,0.3)] bg-[rgba(5,9,24,0.96)] p-5 shadow-[0_28px_80px_-36px_rgba(0,0,0,0.95)]"
+                onClick={(event) => event.stopPropagation()}
+              >
+                <div className="mb-4 flex items-start justify-between gap-3">
+                  <div>
+                    <p className="text-xs font-semibold uppercase tracking-[0.12em] text-[var(--text-muted)]">Step 4</p>
+                    <h2 className="mt-1 text-2xl font-semibold text-[var(--text-primary)]">Jira Export</h2>
+                    <p className="mt-1 text-sm text-[var(--text-secondary)]">
+                      Configure, scan, and export the action plan to Jira from one focused workspace.
+                    </p>
+                  </div>
+                  <Button variant="ghost" onClick={() => setJiraExportModalOpen(false)}>
+                    Close
+                  </Button>
+                </div>
+
+                {renderJiraExportContent()}
+              </motion.div>
+            </motion.div>
+          )}
+        </AnimatePresence>
 
         <AnimatePresence>
           {activeToolMeta && (

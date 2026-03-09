@@ -12,6 +12,7 @@ import {
   getMeetingHandler,
   listMeetingChatHistoryHandler,
   processMeetingHandler,
+  resyncMeetingActionHandler,
   updateMeetingActionHandler,
   uploadMeetingFileHandler,
 } from "../controllers/meetings.js";
@@ -43,6 +44,7 @@ router.post("/meetings/:id/process", processMeetingHandler);
 router.post("/meetings/:id/approve", approveMeetingHandler);
 router.post("/meetings/:id/actions/confirm", confirmMeetingActionsHandler);
 router.patch("/meetings/:id/actions/:actionId", updateMeetingActionHandler);
+router.post("/meetings/:id/actions/:actionId/resync-jira", resyncMeetingActionHandler);
 router.delete("/meetings/:id/actions/:actionId", deleteMeetingActionHandler);
 router.post("/meetings/:id/chat", chatMeetingHandler);
 router.get("/meetings/:id/chat", listMeetingChatHistoryHandler);

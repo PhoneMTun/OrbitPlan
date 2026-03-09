@@ -2,7 +2,7 @@
 
 import { AnimatePresence, motion } from "framer-motion";
 import Link from "next/link";
-import { useRouter, useSearchParams } from "next/navigation";
+import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import { useAuth } from "@/components/auth/auth-provider";
 import { getGoogleAuthUrl } from "@/lib/api";
@@ -76,7 +76,6 @@ function AuthOptionButton({
 export default function LoginPage() {
   const { user, login, isLoading } = useAuth();
   const router = useRouter();
-  const searchParams = useSearchParams();
   const [showEmailLogin, setShowEmailLogin] = useState(false);
   const [email, setEmail] = useState("admin@orbitplan.local");
   const [password, setPassword] = useState("");
@@ -86,26 +85,26 @@ export default function LoginPage() {
 
   useEffect(() => {
     if (!isLoading && user) {
-      router.replace(searchParams.get("next") ?? "/upload");
+      router.replace("/");
     }
-  }, [isLoading, router, searchParams, user]);
+  }, [isLoading, router, user]);
 
   useEffect(() => {
     const handleMessage = async (event: MessageEvent) => {
       if (event.data?.type !== "orbitplan:google-connected") return;
-      router.replace(searchParams.get("next") ?? "/upload");
+      router.replace("/");
     };
 
     window.addEventListener("message", handleMessage);
     return () => window.removeEventListener("message", handleMessage);
-  }, [router, searchParams]);
+  }, [router]);
 
   const handleSubmit = async () => {
     setSubmitting(true);
     setError(null);
     try {
       await login(email, password);
-      router.replace(searchParams.get("next") ?? "/upload");
+      router.replace("/");
     } catch (loginError) {
       setError(loginError instanceof Error ? loginError.message : "Login failed");
     } finally {

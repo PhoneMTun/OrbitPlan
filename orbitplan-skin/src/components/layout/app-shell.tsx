@@ -42,6 +42,7 @@ export function AppShell({
   const router = useRouter();
   const pathname = usePathname();
   const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [sidebarHovered, setSidebarHovered] = useState(false);
   const sidebarStorageKey = user ? `orbitplan:sidebar:${user.id}` : null;
   const persistedSidebarPreference = useSyncExternalStore(
     (onStoreChange) => {
@@ -68,11 +69,13 @@ export function AppShell({
   );
   const resolvedSidebarOpen =
     persistedSidebarPreference === "collapsed" ? false : persistedSidebarPreference === "expanded" ? true : sidebarOpen;
+  const isSidebarPinned = resolvedSidebarOpen;
+  const isSidebarExpanded = resolvedSidebarOpen || sidebarHovered;
   const showSidebar = pathname !== "/";
 
   const handleLogout = async () => {
     await logout();
-    router.push("/login");
+    router.push("/");
   };
 
   const toggleSidebar = () => {
@@ -88,7 +91,7 @@ export function AppShell({
   return (
     <div className="min-h-screen text-[var(--text-primary)]">
       <header className="sticky top-0 z-20 border-b border-[var(--border)] bg-[rgba(6,9,15,0.76)] backdrop-blur-xl">
-        <div className="mx-auto flex w-full max-w-7xl items-center justify-between gap-4 px-6 py-4">
+        <div className="mx-auto flex w-full max-w-[1800px] items-center justify-between gap-4 px-6 py-4 2xl:px-10">
           <Link href="/" className="fade-in flex items-center gap-3 rounded-lg focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]">
             <Image
               src="/orbitplan-logo.png"
@@ -140,57 +143,93 @@ export function AppShell({
         </div>
       </header>
 
-      <div className="mx-auto flex min-h-[calc(100vh-81px)] w-full max-w-7xl gap-0 px-3 py-3 sm:px-4 lg:px-6">
+      <div className="mx-auto flex min-h-[calc(100vh-81px)] w-full max-w-[1800px] gap-0 px-3 py-3 sm:px-4 lg:px-6 2xl:px-10">
         {showSidebar && (
           <motion.aside
-            animate={{ width: resolvedSidebarOpen ? 288 : 108 }}
+            animate={{ width: isSidebarExpanded ? 288 : 92 }}
             transition={{ type: "spring", stiffness: 280, damping: 30 }}
-            className="sticky top-3 hidden h-[calc(100vh-1.5rem)] shrink-0 overflow-hidden rounded-[28px] border border-[rgba(120,145,255,0.22)] bg-[linear-gradient(180deg,rgba(8,12,31,0.96)_0%,rgba(7,10,24,0.94)_100%)] shadow-[0_24px_60px_-36px_rgba(0,0,0,0.85)] lg:block"
+            onMouseEnter={() => setSidebarHovered(true)}
+            onMouseLeave={() => setSidebarHovered(false)}
+            onFocusCapture={() => setSidebarHovered(true)}
+            onBlurCapture={(event) => {
+              if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+                setSidebarHovered(false);
+              }
+            }}
+            className="sticky top-3 hidden h-[calc(100vh-1.5rem)] shrink-0 overflow-hidden rounded-[30px] border border-[rgba(120,145,255,0.18)] bg-[linear-gradient(180deg,rgba(8,12,31,0.98)_0%,rgba(6,10,22,0.96)_100%)] shadow-[0_28px_70px_-42px_rgba(0,0,0,0.92)] lg:block"
           >
             <div className="flex h-full flex-col p-3">
-              <div className="flex items-center justify-end rounded-2xl border border-[rgba(120,145,255,0.18)] bg-[rgba(255,255,255,0.03)] p-3">
+              <div
+                className={`flex items-center rounded-[24px] border border-[rgba(120,145,255,0.14)] bg-[rgba(255,255,255,0.03)] ${
+                  isSidebarExpanded ? "justify-between p-3" : "justify-center px-2 py-3"
+                }`}
+              >
+                {isSidebarExpanded && (
+                  <div className="min-w-0">
+                    <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-[var(--text-muted)]">Workspace</p>
+                    <p className="mt-1 truncate text-sm font-semibold text-[var(--text-primary)]">Meeting Controls</p>
+                  </div>
+                )}
                 <button
                   type="button"
                   onClick={toggleSidebar}
-                  className="rounded-xl border border-[var(--border)] bg-[rgba(255,255,255,0.04)] p-2 text-[var(--text-secondary)] transition hover:text-[var(--text-primary)]"
-                  aria-label={resolvedSidebarOpen ? "Collapse sidebar" : "Expand sidebar"}
+                  className={`rounded-xl border border-[var(--border)] bg-[rgba(255,255,255,0.04)] p-2 text-[var(--text-secondary)] transition hover:text-[var(--text-primary)] ${
+                    isSidebarPinned ? "border-[rgba(56,255,179,0.28)] text-[var(--success)]" : ""
+                  }`}
+                  aria-label={isSidebarPinned ? "Unpin sidebar" : "Pin sidebar open"}
+                  title={isSidebarPinned ? "Unpin sidebar" : "Pin sidebar open"}
                 >
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" className="h-4 w-4">
-                    {resolvedSidebarOpen ? <path d="m15 18-6-6 6-6" /> : <path d="m9 18 6-6-6-6" />}
+                    {isSidebarPinned ? (
+                      <>
+                        <path d="m9 4 6 6" />
+                        <path d="m15 4-6 6" />
+                        <path d="M12 10v9" />
+                      </>
+                    ) : (
+                      <>
+                        <path d="M12 3v8" />
+                        <path d="m8 7 4-4 4 4" />
+                        <path d="M9 14h6" />
+                        <path d="M10 18h4" />
+                      </>
+                    )}
                   </svg>
                 </button>
               </div>
 
               <div
-                className={`mt-4 flex-1 rounded-2xl border border-dashed border-[rgba(120,145,255,0.2)] bg-[rgba(255,255,255,0.02)] ${
-                  resolvedSidebarOpen ? "p-4" : "p-3"
+                className={`mt-4 flex-1 rounded-[24px] border border-[rgba(120,145,255,0.12)] bg-[rgba(255,255,255,0.02)] ${
+                  isSidebarExpanded ? "p-4" : "px-2 py-3"
                 }`}
               >
-                {resolvedSidebarOpen && sidebarContent ? (
+                {isSidebarExpanded && sidebarContent ? (
                   sidebarContent
-                ) : !resolvedSidebarOpen && sidebarCollapsedContent ? (
+                ) : !isSidebarExpanded && sidebarCollapsedContent ? (
                   sidebarCollapsedContent
-                ) : resolvedSidebarOpen ? (
+                ) : isSidebarExpanded ? (
                   <div className="space-y-2">
                     <p className="text-xs font-semibold uppercase tracking-[0.12em] text-[var(--text-muted)]">Sidebar Space</p>
                     <p className="text-sm text-[var(--text-secondary)]">Top navigation was moved back to the header. You can add new sidebar tools here.</p>
                   </div>
                 ) : (
-                  <div className="flex h-full items-start justify-center pt-2 text-[10px] font-semibold uppercase tracking-[0.12em] text-[var(--text-muted)]">
-                    New
+                  <div className="flex h-full items-center justify-center">
+                    <span className="rounded-full border border-[rgba(120,145,255,0.14)] bg-[rgba(255,255,255,0.04)] px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.12em] text-[var(--text-muted)]">
+                      Hover
+                    </span>
                   </div>
                 )}
               </div>
 
-              <div className="space-y-3 rounded-2xl border border-[rgba(120,145,255,0.18)] bg-[rgba(255,255,255,0.03)] p-3">
+              <div className={`mt-4 space-y-3 rounded-[24px] border border-[rgba(120,145,255,0.14)] bg-[rgba(255,255,255,0.03)] ${isSidebarExpanded ? "p-3" : "px-2 py-3"}`}>
                 {user ? (
                   <>
                     <div className="rounded-2xl border border-[rgba(120,145,255,0.2)] bg-[linear-gradient(135deg,rgba(30,123,255,0.14)_0%,rgba(143,56,255,0.12)_65%,rgba(255,180,0,0.08)_100%)] p-3">
-                      <div className={`flex ${resolvedSidebarOpen ? "items-start gap-3" : "justify-center"}`}>
+                      <div className={`flex ${isSidebarExpanded ? "items-start gap-3" : "justify-center"}`}>
                         <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-[linear-gradient(135deg,var(--accent)_0%,var(--accent-strong)_100%)] text-sm font-bold text-white shadow-[0_10px_24px_-16px_rgba(30,123,255,0.8)]">
                           {getUserInitials(user.email)}
                         </div>
-                        {resolvedSidebarOpen && (
+                        {isSidebarExpanded && (
                           <div className="min-w-0 flex-1">
                             <div className="flex items-start justify-between gap-2">
                               <div className="min-w-0">
@@ -224,10 +263,10 @@ export function AppShell({
                       type="button"
                       onClick={() => void handleLogout()}
                       className={`w-full rounded-xl border border-[var(--border)] bg-[rgba(255,255,255,0.04)] px-3 py-2 text-sm font-semibold text-[var(--text-secondary)] transition hover:text-[var(--text-primary)] ${
-                        resolvedSidebarOpen ? "" : "px-0"
+                        isSidebarExpanded ? "" : "px-0"
                       }`}
                     >
-                      {resolvedSidebarOpen ? "Logout" : "Out"}
+                      {isSidebarExpanded ? "Logout" : "Out"}
                     </button>
                   </>
                 ) : !isLoading ? (
@@ -238,7 +277,7 @@ export function AppShell({
                     Login
                   </Link>
                 ) : (
-                  <p className="text-sm text-[var(--text-muted)]">{resolvedSidebarOpen ? "Loading user..." : "..."}</p>
+                  <p className="text-sm text-[var(--text-muted)]">{isSidebarExpanded ? "Loading user..." : "..."}</p>
                 )}
               </div>
             </div>

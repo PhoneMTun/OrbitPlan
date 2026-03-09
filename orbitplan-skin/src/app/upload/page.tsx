@@ -1,7 +1,9 @@
 "use client";
 
 import { useMemo, useState } from "react";
+import { useRouter } from "next/navigation";
 import { RequireAuth } from "@/components/auth/require-auth";
+import { useAuth } from "@/components/auth/auth-provider";
 import { AppShell } from "@/components/layout/app-shell";
 import { MovingBorderLink } from "@/components/aceternity/moving-border-link";
 import { Button } from "@/components/ui/button";
@@ -9,12 +11,14 @@ import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { FileUpload } from "@/components/aceternity/file-upload";
 import { OrbitLoader } from "@/components/marketing/orbit-loader";
-import { createMeeting, getProcessingErrorMessage, processMeeting, uploadMeetingFile } from "@/lib/api";
+import { ApiRequestError, createMeeting, getProcessingErrorMessage, processMeeting, uploadMeetingFile } from "@/lib/api";
 import { MeetingCreateSchema } from "@/dto/meetings";
 
 const SUPPORTED_EXTENSIONS = new Set(["mp3", "wav", "m4a", "mp4", "webm"]);
 
 export default function UploadPage() {
+  const router = useRouter();
+  const { refresh } = useAuth();
   const [title, setTitle] = useState("");
   const [attendees, setAttendees] = useState("");
   const [scheduledAt, setScheduledAt] = useState("");
@@ -70,6 +74,12 @@ export default function UploadPage() {
       await processMeeting(created.id);
       setReviewId(created.id);
     } catch (submitError) {
+      if (submitError instanceof ApiRequestError && submitError.status === 401) {
+        await refresh();
+        setError("Your session expired after login/logout. Please sign in again and retry the upload.");
+        router.replace("/login?next=%2Fupload");
+        return;
+      }
       setError(getProcessingErrorMessage(submitError));
     } finally {
       setIsSubmitting(false);
@@ -84,6 +94,12 @@ export default function UploadPage() {
       await processMeeting(createdMeetingId);
       setReviewId(createdMeetingId);
     } catch (retryError) {
+      if (retryError instanceof ApiRequestError && retryError.status === 401) {
+        await refresh();
+        setError("Your session expired after login/logout. Please sign in again and retry processing.");
+        router.replace("/login?next=%2Fupload");
+        return;
+      }
       setError(getProcessingErrorMessage(retryError));
     } finally {
       setIsRetryingProcess(false);

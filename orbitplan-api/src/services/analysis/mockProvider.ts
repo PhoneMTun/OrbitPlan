@@ -1,5 +1,5 @@
 import type { AnalysisInput, AnalysisProvider, AnalysisResult } from "./types.js";
-import { extractActionsFromTranscript, generateStarterActionsFromIntent } from "./actionExtraction.js";
+import { extractActionsFromTranscript, finalizeActions, generateStarterActionsFromIntent } from "./actionExtraction.js";
 
 const firstSentence = (value: string) => value.split(/[.!?]\s/).find((item) => item.trim().length > 0)?.trim();
 
@@ -14,7 +14,7 @@ export class MockAnalysisProvider implements AnalysisProvider {
       decisions: `- ${decision}`,
       risks: "Review action owners and due dates before approval.",
       notes: ["Summary:", summary, "", "Next Steps:", "- Confirm owners", "- Confirm due dates"].join("\n"),
-      actions: extractedActions.length > 0 ? extractedActions : starterActions,
+      actions: finalizeActions(extractedActions, starterActions, input.attendees),
     };
   }
 }

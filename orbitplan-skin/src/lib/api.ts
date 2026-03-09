@@ -2,7 +2,7 @@ import { config } from "@/lib/config";
 import type { MeetingCreateDTO } from "@/dto/meetings";
 import type { ActionPriority, ActionStatus } from "@/types/action";
 import type { AuthUser } from "@/types/auth";
-import type { JiraExportResult, JiraIntegrationStatus, JiraProject, JiraSite } from "@/types/jira";
+import type { JiraExportResult, JiraIntegrationStatus, JiraIssueTypeCreateMeta, JiraLookupItem, JiraProject, JiraScanResult, JiraSite } from "@/types/jira";
 import type { Meeting } from "@/types/meeting";
 import type { MeetingChatHistoryResponse, MeetingChatResponse } from "@/types/chat";
 import type { MeetingDetail } from "@/types/meetingDetail";
@@ -185,6 +185,15 @@ export const deleteMeetingAction = async (meetingId: string, actionId: string): 
   return (await response.json()) as MeetingDetail;
 };
 
+export const resyncMeetingAction = async (meetingId: string, actionId: string): Promise<MeetingDetail> => {
+  const response = await apiFetch(`${config.apiBaseUrl}/api/meetings/${meetingId}/actions/${actionId}/resync-jira`, {
+    method: "POST",
+  });
+
+  if (!response.ok) return toError(response);
+  return (await response.json()) as MeetingDetail;
+};
+
 export const confirmMeetingActions = async (meetingId: string, confirmed: boolean): Promise<MeetingDetail> => {
   const response = await apiFetch(`${config.apiBaseUrl}/api/meetings/${meetingId}/actions/confirm`, {
     method: "POST",
@@ -209,6 +218,13 @@ export const getJiraAuthUrl = async (): Promise<string> => {
   return data.url;
 };
 
+export const disconnectJira = async (): Promise<void> => {
+  const response = await apiFetch(`${config.apiBaseUrl}/api/integrations/jira/disconnect`, {
+    method: "POST",
+  });
+  if (!response.ok) return toError(response);
+};
+
 export const getJiraSites = async (): Promise<JiraSite[]> => {
   const response = await apiFetch(`${config.apiBaseUrl}/api/integrations/jira/sites`, { cache: "no-store" });
   if (!response.ok) return toError(response);
@@ -222,6 +238,31 @@ export const getJiraProjects = async (cloudId: string): Promise<JiraProject[]> =
   if (!response.ok) return toError(response);
   const data = (await response.json()) as { projects: JiraProject[] };
   return data.projects;
+};
+
+export const getJiraCreateMeta = async (cloudId: string, projectKey: string): Promise<JiraIssueTypeCreateMeta[]> => {
+  const params = new URLSearchParams({ cloudId, projectKey });
+  const response = await apiFetch(`${config.apiBaseUrl}/api/integrations/jira/create-meta?${params.toString()}`, {
+    cache: "no-store",
+  });
+  if (!response.ok) return toError(response);
+  const data = (await response.json()) as { issueTypes: JiraIssueTypeCreateMeta[] };
+  return data.issueTypes;
+};
+
+export const getJiraLookup = async (
+  cloudId: string,
+  projectKey: string,
+  kind: "user" | "issue" | "epic" | "sprint",
+  query: string,
+): Promise<JiraLookupItem[]> => {
+  const params = new URLSearchParams({ cloudId, projectKey, kind, query });
+  const response = await apiFetch(`${config.apiBaseUrl}/api/integrations/jira/lookup?${params.toString()}`, {
+    cache: "no-store",
+  });
+  if (!response.ok) return toError(response);
+  const data = (await response.json()) as { items: JiraLookupItem[] };
+  return data.items;
 };
 
 export const exportMeetingToJira = async (payload: {
@@ -245,6 +286,29 @@ export const exportMeetingToJira = async (payload: {
   });
   if (!response.ok) return toError(response);
   return (await response.json()) as JiraExportResult;
+};
+
+export const scanMeetingToJira = async (payload: {
+  meetingId: string;
+  cloudId: string;
+  projectKey: string;
+  ticketFormatPreset?: "enterprise" | "engineering" | "operations" | "compliance";
+  ticketDetails?: {
+    issueType?: string;
+    labels?: string[];
+    components?: string[];
+    environment?: string;
+    additionalContext?: string;
+    advancedFields?: Record<string, unknown>;
+  };
+}): Promise<JiraScanResult> => {
+  const response = await apiFetch(`${config.apiBaseUrl}/api/integrations/jira/scan`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) return toError(response);
+  return (await response.json()) as JiraScanResult;
 };
 
 export const login = async (payload: { email: string; password: string }): Promise<AuthUser> => {

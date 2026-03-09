@@ -1,5 +1,8 @@
 import type { AnalysisAction } from "./types.js";
 
+const MIN_ACTIONS = 3;
+const MAX_ACTIONS = 5;
+
 const ACTION_HINT_REGEX =
   /\b(action item|action items|todo|to do|next step|next steps|follow up|owner|deadline|will|need to|needs to|should|must)\b/i;
 
@@ -15,6 +18,29 @@ const VISION_ONLY_REGEX =
   /\b(i want|we want|would like|it would be cool|it would be nice|our dream|our vision)\b/i;
 
 const normalizeWhitespace = (value: string) => value.replace(/\s+/g, " ").trim();
+const canonicalizeAction = (value: string) =>
+  normalizeWhitespace(value)
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, "")
+    .replace(/\b(the|a|an|to|for|of|and)\b/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+const areNearDuplicateActions = (left: string, right: string) => {
+  const leftWords = canonicalizeAction(left).split(" ").filter(Boolean);
+  const rightWords = canonicalizeAction(right).split(" ").filter(Boolean);
+  if (leftWords.length === 0 || rightWords.length === 0) return false;
+
+  const leftSet = new Set(leftWords);
+  const rightSet = new Set(rightWords);
+  let overlap = 0;
+  for (const word of leftSet) {
+    if (rightSet.has(word)) overlap += 1;
+  }
+
+  const overlapRatio = overlap / Math.max(Math.min(leftSet.size, rightSet.size), 1);
+  return overlapRatio >= 0.8;
+};
 
 const splitCandidates = (transcript: string): string[] =>
   transcript
@@ -162,4 +188,55 @@ export const generateStarterActionsFromIntent = (
   }
 
   return results.slice(0, 5);
+};
+
+export const finalizeActions = (
+  primaryActions: AnalysisAction[],
+  fallbackActions: AnalysisAction[],
+  attendees: string[],
+): AnalysisAction[] => {
+  const merged = [...primaryActions, ...fallbackActions];
+  const deduped: AnalysisAction[] = [];
+
+  for (const action of merged) {
+    const description = normalizeWhitespace(action.description);
+    if (!description) continue;
+
+    const ownerEmail = action.ownerEmail ?? attendees[0];
+    const existing = deduped.find(
+      (item) =>
+        item.ownerEmail === ownerEmail &&
+        (canonicalizeAction(item.description) === canonicalizeAction(description) ||
+          areNearDuplicateActions(item.description, description)),
+    );
+
+    if (existing) {
+      if (action.confidence > existing.confidence) {
+        existing.description = description;
+        existing.ownerEmail = ownerEmail;
+        existing.dueDate = action.dueDate ?? existing.dueDate;
+        existing.confidence = action.confidence;
+      } else if (!existing.dueDate && action.dueDate) {
+        existing.dueDate = action.dueDate;
+      }
+      continue;
+    }
+
+    deduped.push({
+      description,
+      ownerEmail,
+      dueDate: action.dueDate,
+      confidence: action.confidence,
+    });
+  }
+
+  const sorted = deduped
+    .sort((a, b) => {
+      if (b.confidence !== a.confidence) return b.confidence - a.confidence;
+      return a.description.localeCompare(b.description);
+    })
+    .slice(0, MAX_ACTIONS);
+
+  if (sorted.length >= MIN_ACTIONS) return sorted;
+  return sorted.slice(0, MIN_ACTIONS);
 };

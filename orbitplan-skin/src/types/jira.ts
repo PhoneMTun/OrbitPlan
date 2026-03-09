@@ -15,6 +15,35 @@ export type JiraProject = {
   name: string;
 };
 
+export type JiraCreateFieldOption = {
+  id: string;
+  label: string;
+  children?: JiraCreateFieldOption[];
+};
+
+export type JiraCreateFieldMeta = {
+  key: string;
+  name: string;
+  required: boolean;
+  schemaType?: string;
+  itemsType?: string;
+  custom?: string;
+  allowedValues?: JiraCreateFieldOption[];
+};
+
+export type JiraIssueTypeCreateMeta = {
+  id: string;
+  name: string;
+  description?: string;
+  fields: JiraCreateFieldMeta[];
+};
+
+export type JiraLookupItem = {
+  id: string;
+  label: string;
+  secondary?: string;
+};
+
 export type JiraExportResult = {
   createdCount: number;
   issues: Array<{
@@ -22,4 +51,17 @@ export type JiraExportResult = {
     key: string;
     url: string;
   }>;
+};
+
+export type JiraScanItem = {
+  actionId: string;
+  description: string;
+  status: "ready" | "blocked";
+  reasons: string[];
+};
+
+export type JiraScanResult = {
+  readyCount: number;
+  blockedCount: number;
+  items: JiraScanItem[];
 };
