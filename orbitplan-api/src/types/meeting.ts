@@ -16,4 +16,8 @@ export type Meeting = {
   status: MeetingStatus;
   actionsConfirmed: boolean;
   createdAt: string;
+  /** Set when status is `error` after failed processing. */
+  processingError?: string;
+  /** ISO time when async processing was last started. */
+  processingStartedAt?: string;
 };

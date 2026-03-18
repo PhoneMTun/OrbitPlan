@@ -44,6 +44,8 @@ const mapMeeting = (meeting: {
   status: "created" | "processing" | "ready" | "approved" | "error";
   actionsConfirmed: boolean;
   createdAt: Date;
+  processingError: string | null;
+  processingStartedAt: Date | null;
 }): Meeting => ({
   id: meeting.id,
   title: meeting.title,
@@ -58,6 +60,8 @@ const mapMeeting = (meeting: {
   status: meeting.status,
   actionsConfirmed: meeting.actionsConfirmed,
   createdAt: meeting.createdAt.toISOString(),
+  ...(meeting.processingError ? { processingError: meeting.processingError } : {}),
+  ...(meeting.processingStartedAt ? { processingStartedAt: meeting.processingStartedAt.toISOString() } : {}),
 });
 
 const mapFile = (file: {
@@ -356,11 +360,47 @@ export const processMeeting = async (meetingId: string, transcriptText: string, 
       data: {
         status: "ready",
         actionsConfirmed: false,
+        processingStartedAt: null,
+        processingError: null,
       },
     });
   });
 
   return getMeetingById(meetingId);
+};
+
+const staleProcessingCutoff = (): Date => {
+  const ms = Number(process.env.PROCESS_STALE_MS ?? 45 * 60 * 1000);
+  return new Date(Date.now() - (Number.isFinite(ms) && ms > 0 ? ms : 45 * 60 * 1000));
+};
+
+/** Returns true if this call acquired the processing lock (or re-acquired a stale one). */
+export const tryBeginAsyncMeetingProcess = async (meetingId: string): Promise<boolean> => {
+  const stale = staleProcessingCutoff();
+  const result = await prisma.meeting.updateMany({
+    where: {
+      id: meetingId,
+      OR: [{ status: { not: "processing" } }, { processingStartedAt: null }, { processingStartedAt: { lt: stale } }],
+    },
+    data: {
+      status: "processing",
+      processingStartedAt: new Date(),
+      processingError: null,
+    },
+  });
+  return result.count > 0;
+};
+
+export const markMeetingProcessFailed = async (meetingId: string, errorMessage: string) => {
+  const truncated = errorMessage.slice(0, 2000);
+  await prisma.meeting.update({
+    where: { id: meetingId },
+    data: {
+      status: "error",
+      processingError: truncated,
+      processingStartedAt: null,
+    },
+  });
 };
 
 export const approveMeeting = async (meetingId: string) => {

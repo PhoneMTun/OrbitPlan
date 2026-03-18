@@ -10,4 +10,6 @@ export type Meeting = {
   status: MeetingStatus;
   actionsConfirmed: boolean;
   createdAt: string;
+  processingError?: string;
+  processingStartedAt?: string;
 };

@@ -27,4 +27,7 @@ export const env = {
   microsoftClientSecret: process.env.MICROSOFT_CLIENT_SECRET,
   microsoftRedirectUri: process.env.MICROSOFT_REDIRECT_URI,
   teamsWebhookSecret: process.env.TEAMS_WEBHOOK_SECRET,
+  /** POST JSON when async meeting process finishes: { meetingId, status, error? } */
+  processWebhookUrl: process.env.PROCESS_WEBHOOK_URL,
+  processWebhookSecret: process.env.PROCESS_WEBHOOK_SECRET,
 };

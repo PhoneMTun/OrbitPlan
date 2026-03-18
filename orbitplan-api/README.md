@@ -1,12 +1,25 @@
 # OrbitPlan API
 
+Express + Prisma API: **upload → transcribe → analyze** (decisions, risks, notes, actions) → persist; plus meeting chat and Jira.
+
 ## Setup
 
+From the monorepo root:
+
 ```bash
-cd /Users/phonemyat/Documents/New project/orbitplan-api
+cd orbitplan-api
 cp .env.example .env
 npm install
+npm run db:up
+npm run prisma:generate
+npm run prisma:migrate
 npm run dev
+```
+
+Or absolute path:
+
+```bash
+cd "/path/to/orbitplan/orbitplan-api"
 ```
 
 ## Postgres + Prisma
@@ -18,8 +31,8 @@ OrbitPlan API runtime now uses PostgreSQL + Prisma for auth sessions, meetings, 
 Use Docker:
 
 ```bash
-cd /Users/phonemyat/Documents/New project/orbitplan-api
-open -a Docker
+cd orbitplan-api
+open -a Docker   # macOS
 npm run db:up
 ```
 
@@ -62,6 +75,18 @@ npm run prisma:push
 - `CHAT_PROVIDER=mock` answers meeting questions from local heuristics.
 - `CHAT_PROVIDER=openai` answers questions grounded on transcript + summary + actions.
 - `AI_TIMEOUT_MS` controls OpenAI request timeout (default `180000`).
+- `LOG_LEVEL` — `debug` | `info` | `warn` | `error` for structured JSON logs (default: debug in development, info in production).
+
+## Architecture (where to look)
+
+| Area | Path |
+|------|------|
+| HTTP app + `/health` | `src/app.ts` |
+| Meeting routes | `src/routes/meetings.ts` |
+| Process pipeline (transcribe → analyze → DB) | `src/controllers/meetings.ts` → `processMeeting` in `src/storage/meetingsStore.ts` |
+| Transcription / analysis / chat providers | `src/services/transcription`, `src/services/analysis`, `src/services/chat` |
+| **Editable AI prompts** | `src/prompts/meetingAnalysis.ts`, `src/prompts/meetingChat.ts` |
+| Process observability | JSON logs: `meeting.process.*` events (see `src/lib/logger.ts`) |
 
 ## Health Check
 
@@ -92,8 +117,39 @@ curl -X POST http://localhost:4000/api/meetings/123/upload \
 
 ## Process Meeting (Transcription + Summary Draft)
 
+**Default (async):** returns **202** immediately and runs transcription + analysis in the background.
+
 ```bash
-curl -X POST http://localhost:4000/api/meetings/123/process
+curl -i -X POST http://localhost:4000/api/meetings/123/process \
+  -H "Cookie: orbitplan_session=..."
+```
+
+Response body example:
+
+```json
+{
+  "accepted": true,
+  "status": "processing",
+  "meetingId": "…",
+  "pollUrl": "/api/meetings/…",
+  "message": "Processing started. Poll GET …"
+}
+```
+
+Poll until `GET /api/meetings/:id` shows `"status": "ready"` or `"error"`. On error, `processingError` explains what went wrong.
+
+**Optional webhook** when processing finishes: set `PROCESS_WEBHOOK_URL` (and optional `PROCESS_WEBHOOK_SECRET` for `Authorization: Bearer …`). Payload:
+
+```json
+{ "meetingId": "uuid", "status": "ready" }
+```
+
+or `{ "meetingId": "uuid", "status": "error", "error": "…" }`.
+
+**Blocking (same as before):** add `?wait=true` (long request; use for scripts only).
+
+```bash
+curl -X POST "http://localhost:4000/api/meetings/123/process?wait=true"
 ```
 
 ## Approve Meeting (Logs outbound email intents)

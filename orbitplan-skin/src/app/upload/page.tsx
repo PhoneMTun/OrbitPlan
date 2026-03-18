@@ -113,7 +113,7 @@ export default function UploadPage() {
           <p className="text-xs uppercase tracking-[0.16em] text-[var(--text-muted)]">Intake Console</p>
           <h2 className="mt-1 text-2xl font-bold">Create Meeting Mission</h2>
           <p className="mt-2 max-w-2xl text-sm text-[var(--text-secondary)]">
-            This action triggers three backend steps in sequence: create metadata, upload media, and run transcription.
+            Create metadata, upload media, then start processing (async on the server). The app polls until your plan is ready.
           </p>
         </div>
 
@@ -170,7 +170,7 @@ export default function UploadPage() {
             <ol className="space-y-2 text-sm text-[var(--text-secondary)]">
               <li>1. `POST /api/meetings`</li>
               <li>2. `POST /api/meetings/:id/upload`</li>
-              <li>3. `POST /api/meetings/:id/process`</li>
+              <li>3. `POST /api/meetings/:id/process` → 202 + poll `GET` until `ready`</li>
             </ol>
           </Card>
         </div>

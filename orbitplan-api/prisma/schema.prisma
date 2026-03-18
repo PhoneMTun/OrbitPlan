@@ -71,6 +71,10 @@ model Meeting {
   status           MeetingStatus
   actionsConfirmed Boolean             @default(true)
   createdAt        DateTime            @default(now())
+  /// Last process failure message (when status is error). Cleared on new process.
+  processingError  String?
+  /// When async processing started; used to detect stale locks (e.g. server crash).
+  processingStartedAt DateTime?
 
   files            MeetingFile[]
   transcript       MeetingTranscript?

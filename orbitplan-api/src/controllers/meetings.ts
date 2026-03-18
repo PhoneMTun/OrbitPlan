@@ -2,6 +2,7 @@ import type { Request, Response } from "express";
 import { z } from "zod";
 import { MeetingCreateSchema } from "../dto/meetings.js";
 import type { ActionItem } from "../types/action.js";
+import { SUPPORTED_MEETING_MIME_TYPES } from "../constants/meetingMedia.js";
 import {
   addMeetingFile,
   appendMeetingChatMessages,
@@ -14,6 +15,7 @@ import {
   getMeetingById,
   getLatestMeetingFile,
   processMeeting,
+  tryBeginAsyncMeetingProcess,
   updateMeetingAction,
 } from "../storage/meetingsStore.js";
 import { createAnalysisProvider } from "../services/analysis/index.js";
@@ -21,18 +23,8 @@ import { createMeetingChatProvider } from "../services/chat/index.js";
 import { JiraIntegrationError, jiraIntegration } from "../services/integrations/jira.js";
 import { createTranscriptionProvider } from "../services/transcription/index.js";
 import { env } from "../config/env.js";
-
-const SUPPORTED_MIME_TYPES = new Set([
-  "audio/mpeg",
-  "audio/mp3",
-  "audio/wav",
-  "audio/x-wav",
-  "audio/mp4",
-  "audio/m4a",
-  "audio/webm",
-  "video/mp4",
-  "video/webm",
-]);
+import { logger } from "../lib/logger.js";
+import { runMeetingProcessJob } from "../jobs/meetingProcessJob.js";
 
 class TimeoutError extends Error {
   constructor(message: string) {
@@ -185,7 +177,7 @@ export const processMeetingHandler = async (req: Request, res: Response) => {
     return res.status(400).json({ error: "No uploaded file found for this meeting" });
   }
 
-  if (!SUPPORTED_MIME_TYPES.has(latestFile.mimeType)) {
+  if (!SUPPORTED_MEETING_MIME_TYPES.has(latestFile.mimeType)) {
     return res.status(400).json({
       code: "invalid_format",
       error: "Unsupported file format",
@@ -193,8 +185,54 @@ export const processMeetingHandler = async (req: Request, res: Response) => {
     });
   }
 
+  const meetingId = req.params.id;
+  const wait =
+    req.query.wait === "true" ||
+    req.query.wait === "1" ||
+    String(req.query.wait).toLowerCase() === "yes";
+
+  if (!wait) {
+    const acquired = await tryBeginAsyncMeetingProcess(meetingId);
+    if (!acquired) {
+      return res.status(202).json({
+        accepted: false,
+        status: "processing",
+        meetingId,
+        message: "This meeting is already being processed. Poll GET /api/meetings/:id until status is ready or error.",
+        pollUrl: `/api/meetings/${meetingId}`,
+      });
+    }
+
+    setImmediate(() => {
+      void runMeetingProcessJob(meetingId).catch((err) => {
+        logger.error("meeting.process.async.unhandled", {
+          meetingId,
+          message: err instanceof Error ? err.message : String(err),
+        });
+      });
+    });
+
+    return res.status(202).json({
+      accepted: true,
+      status: "processing",
+      meetingId,
+      message: "Processing started. Poll GET /api/meetings/:id until status is ready or error. Optional webhook: set PROCESS_WEBHOOK_URL.",
+      pollUrl: `/api/meetings/${meetingId}`,
+    });
+  }
+
+  const t0 = performance.now();
+
   try {
+    logger.info("meeting.process.start", {
+      meetingId,
+      mimeType: latestFile.mimeType,
+      transcriptionProvider: env.transcriptionProvider,
+      analysisProvider: env.analysisProvider,
+    });
+
     const provider = createTranscriptionProvider();
+    const tTranscribe = performance.now();
     const transcript = await withTimeout(
       provider.transcribe({
         filePath: latestFile.path,
@@ -203,8 +241,14 @@ export const processMeetingHandler = async (req: Request, res: Response) => {
       env.aiTimeoutMs,
       `Transcription timed out after ${Math.round(env.aiTimeoutMs / 1000)} seconds`,
     );
+    logger.info("meeting.process.transcription_done", {
+      meetingId,
+      durationMs: Math.round(performance.now() - tTranscribe),
+      transcriptChars: transcript.text.length,
+    });
 
     const analysisProvider = createAnalysisProvider();
+    const tAnalyze = performance.now();
     const analysis = await withTimeout(
       analysisProvider.analyze({
         meetingTitle: meeting.meeting.title,
@@ -214,15 +258,33 @@ export const processMeetingHandler = async (req: Request, res: Response) => {
       env.aiTimeoutMs,
       `Analysis timed out after ${Math.round(env.aiTimeoutMs / 1000)} seconds`,
     );
+    logger.info("meeting.process.analysis_done", {
+      meetingId,
+      durationMs: Math.round(performance.now() - tAnalyze),
+      actionCount: analysis.actions.length,
+    });
 
+    const tPersist = performance.now();
     const processed = await processMeeting(req.params.id, transcript.text, analysis);
     if (!processed) {
       return res.status(404).json({ error: "Meeting not found" });
     }
+    logger.info("meeting.process.complete", {
+      meetingId,
+      persistMs: Math.round(performance.now() - tPersist),
+      totalMs: Math.round(performance.now() - t0),
+    });
 
     return res.status(200).json(processed);
   } catch (error) {
     const classified = classifyProcessingError(error);
+    logger.error("meeting.process.failed", {
+      meetingId,
+      code: classified.code,
+      status: classified.status,
+      message: error instanceof Error ? error.message : String(error),
+      totalMs: Math.round(performance.now() - t0),
+    });
     const status = classified.status;
     return res.status(status).json({
       error: "AI processing failed",

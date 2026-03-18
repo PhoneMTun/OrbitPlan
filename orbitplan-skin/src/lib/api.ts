@@ -106,8 +106,48 @@ export const uploadMeetingFile = async (meetingId: string, file: File) => {
   return response.json();
 };
 
+const POLL_INTERVAL_MS = 2000;
+const POLL_MAX_MS = 20 * 60 * 1000;
+
+const pollMeetingUntilProcessed = async (meetingId: string): Promise<MeetingDetail> => {
+  const deadline = Date.now() + POLL_MAX_MS;
+  while (Date.now() < deadline) {
+    const detail = await getMeeting(meetingId);
+    const status = detail.meeting.status;
+    if (status === "ready") return detail;
+    if (status === "error") {
+      const msg = detail.meeting.processingError ?? "Processing failed.";
+      throw new ApiRequestError(msg, { status: 502, code: "provider_error", details: msg });
+    }
+    await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
+  }
+  throw new ApiRequestError(
+    "Processing is still running. Open the review page in a few minutes or retry.",
+    { status: 504, code: "timeout" },
+  );
+};
+
+/**
+ * Starts async processing (202) and polls until ready/error.
+ * Use `processMeetingSync` for blocking behavior (e.g. curl scripts): POST .../process?wait=true
+ */
 export const processMeeting = async (meetingId: string): Promise<MeetingDetail> => {
   const response = await apiFetch(`${config.apiBaseUrl}/api/meetings/${meetingId}/process`, {
+    method: "POST",
+  });
+
+  if (response.status === 202) {
+    await response.json().catch(() => ({}));
+    return pollMeetingUntilProcessed(meetingId);
+  }
+
+  if (!response.ok) return toError(response);
+  return (await response.json()) as MeetingDetail;
+};
+
+/** Blocking transcription + analysis in one request (long timeout). */
+export const processMeetingSync = async (meetingId: string): Promise<MeetingDetail> => {
+  const response = await apiFetch(`${config.apiBaseUrl}/api/meetings/${meetingId}/process?wait=true`, {
     method: "POST",
   });
 
